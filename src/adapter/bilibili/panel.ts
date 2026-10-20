@@ -44,6 +44,25 @@ import type { UrlSourceEntry } from './sources/state'
 
 const ROOT_CLASS = 'k-bili-dm'
 
+/**
+ * 当前运行的脚本版本。
+ *
+ * 之前 @version 一直停在 1.60.3，改了多少轮都不变，结果就是：Tampermonkey
+ * 判断不出版本更新，用户重装后也没法确认跑的是不是新脚本，只能靠肉眼比对
+ * 界面差异，非常容易误判成「改了没生效」。把版本显示在面板标题旁边，
+ * 一眼就能确认。
+ */
+function runningVersion(): string {
+  try {
+    const info = (typeof GM_info !== 'undefined' ? GM_info : undefined) as
+      | { script?: { version?: string } }
+      | undefined
+    return info?.script?.version || ''
+  } catch {
+    return ''
+  }
+}
+
 /** 控制条右侧的按钮容器（不同版本结构不一样，挨个试） */
 const CONTROL_BAR_SELECTORS = [
   '.bpx-player-control-bottom-right',
@@ -115,9 +134,12 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
   const header = el('div', `${ROOT_CLASS}__header`)
   const titleText = el('span', `${ROOT_CLASS}__title`, '第三方弹幕')
+  const version = runningVersion()
+  const versionText = el('span', `${ROOT_CLASS}__version`, version ? `v${version}` : '')
+  versionText.title = '当前运行的脚本版本，用来确认装的是不是最新的'
   const closeBtn = el('button', `${ROOT_CLASS}__close`, '×')
   closeBtn.title = '收起'
-  header.append(titleText, closeBtn)
+  header.append(titleText, versionText, closeBtn)
 
   const switchRow = el('label', `${ROOT_CLASS}__row`)
   const switchLabel = el('span', `${ROOT_CLASS}__label`, '启用注入')

@@ -80,6 +80,21 @@
     color: #fff;
   }
 
+  // 版本号紧跟在标题后面，用 margin-right:auto 把关闭按钮顶到最右，
+  // 这样就算版本号是空的（非油猴环境），标题也不会跑位。
+  &__version {
+    flex: 0 0 auto;
+    margin-left: 6px;
+    margin-right: auto;
+    font-size: 11px;
+    color: #6b7280;
+    user-select: text;
+
+    &:empty {
+      display: none;
+    }
+  }
+
   &__close {
     width: 20px;
     height: 20px;
