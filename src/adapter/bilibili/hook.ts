@@ -26,6 +26,8 @@ interface SegRequest {
   oid?: number
   startMs: number
   endMs: number
+  /** 分段序号，只用于诊断显示 */
+  index?: number
 }
 
 interface HookStats {
@@ -45,6 +47,10 @@ interface HookStats {
   injected: number
   /** 最近一次合并被丢弃的原因，用于面板上直接显示 */
   lastDetail: string
+  /** 最近一次分段请求的生命周期（readyState/status/是否被中止/是否读了 response） */
+  lastState: string
+  /** response getter 的安装结果，装不上时这里写原因 */
+  hook: string
 }
 
 interface HookState {
@@ -60,6 +66,7 @@ interface HookState {
 type XHRWithContext = XMLHttpRequest & {
   __kdCtx?: SegRequest
   __kdMerged?: { result: ArrayBuffer | null }
+  __kdRead?: boolean
 }
 
 const state: HookState = {
@@ -126,6 +133,8 @@ function emptyStats(): HookStats {
     segments: 0,
     injected: 0,
     lastDetail: '',
+    lastState: '',
+    hook: '',
   }
 }
 
@@ -167,6 +176,7 @@ function parseSegRequest(rawUrl: string): SegRequest | undefined {
     oid,
     startMs: (index - 1) * SEGMENT_MS,
     endMs: index * SEGMENT_MS,
+    index,
   }
 }
 
@@ -536,30 +546,98 @@ function mergeResponse(
  * 但只要页面某处缓存了原型 getter 再 .call(xhr)，实例属性就被绕过，
  * 表现为「请求发出去了、播放器一次都没读」。
  */
+/**
+ * 沿原型链找 `response` 的访问器。油猴沙箱里它未必是 prototype 的自有属性，
+ * 直接 getOwnPropertyDescriptor 会拿到 undefined，补丁就静默失效了。
+ */
+function findResponseAccessor(
+  proto: unknown
+): { holder: any; desc: PropertyDescriptor } | null {
+  let obj: any = proto
+  let depth = 0
+  while (obj && depth < 8) {
+    try {
+      const desc = Object.getOwnPropertyDescriptor(obj, 'response')
+      if (desc && typeof desc.get === 'function') return { holder: obj, desc }
+    } catch (error) {
+      // 跨 realm 的代理对象取描述符可能抛错，继续往上找
+    }
+    obj = Object.getPrototypeOf(obj)
+    depth++
+  }
+  return null
+}
+
 function installResponseGetter(target?: any): boolean {
   const Ctor = target?.XMLHttpRequest || XmlHttpRequestCtor
   const proto = Ctor?.prototype
-  if (!proto) return false
-  if ((proto as any).__kdResponsePatched) return true
+  if (!proto) {
+    state.stats.hook = '找不到 XMLHttpRequest.prototype'
+    return false
+  }
 
-  const desc = Object.getOwnPropertyDescriptor(proto, 'response')
-  if (!desc || !desc.get) return false
-  const originalGet = desc.get
+  const found = findResponseAccessor(proto)
+  if (!found) {
+    state.stats.hook = '原型链上找不到 response 访问器'
+    return false
+  }
+  const { holder, desc } = found
+  if ((holder as any).__kdResponsePatched) {
+    state.stats.hook = 'ok'
+    return true
+  }
 
-  Object.defineProperty(proto, 'response', {
-    configurable: true,
-    enumerable: desc.enumerable,
-    get(this: XHRWithContext) {
-      const raw = originalGet.call(this)
-      const ctx = this.__kdCtx
-      if (!ctx || !state.enabled) return raw
-      state.stats.reads++
-      return mergeResponse(this, ctx, raw)
-    },
-  })
+  const originalGet = desc.get as (this: XMLHttpRequest) => unknown
+  try {
+    Object.defineProperty(holder, 'response', {
+      configurable: true,
+      enumerable: desc.enumerable,
+      get(this: XHRWithContext) {
+        const raw = originalGet.call(this)
+        const ctx = this.__kdCtx
+        if (!ctx) return raw
+        this.__kdRead = true
+        if (!state.enabled) return raw
+        state.stats.reads++
+        return mergeResponse(this, ctx, raw)
+      },
+    })
+  } catch (error) {
+    state.stats.hook = `替换 response 失败：${(error as Error).message}`
+    return false
+  }
 
-  ;(proto as any).__kdResponsePatched = true
+  ;(holder as any).__kdResponsePatched = true
+  state.stats.hook = 'ok'
   return true
+}
+
+/**
+ * 记录一个分段请求的完整生命周期。播放器不读 response 时，靠这些字段区分
+ * 「请求被取消了」「请求还在路上」「请求完成了但没人读」三种情况。
+ */
+function trackRequest(xhr: XHRWithContext, request: SegRequest) {
+  const describe = (why: string) => {
+    const seg = request.index ? `第${request.index}段` : '分段'
+    state.stats.lastState = `${seg} ${why} readyState=${xhr.readyState} status=${
+      (xhr as any).status
+    } responseType=${JSON.stringify((xhr as any).responseType)} read=${
+      xhr.__kdRead ? 'yes' : 'no'
+    }`
+  }
+
+  describe('发出')
+  try {
+    xhr.addEventListener('load', () => describe('load'))
+    xhr.addEventListener('error', () => describe('error'))
+    xhr.addEventListener('abort', () => describe('abort'))
+    xhr.addEventListener('timeout', () => describe('timeout'))
+    xhr.addEventListener('readystatechange', () => {
+      if (xhr.readyState >= 2) describe(`rs${xhr.readyState}`)
+    })
+  } catch (error) {
+    // 个别实现不允许加监听，忽略
+  }
 }
 
 async function waitForLoading() {
@@ -610,6 +688,7 @@ function patchXHR(target?: any): boolean {
     // 立即发送。之前为了等弹弹play 数据把 send 往后推了几秒，
     // 结果播放器等不到响应就走掉了，之后再也不会读 response。
     state.stats.xhrs++
+    trackRequest(this, request)
     return originalSend.call(this, body as any)
   }
 
@@ -739,9 +818,11 @@ export function installHook() {
     }
   }
 
+  const hooked = findResponseAccessor(XmlHttpRequestCtor.prototype)
   console.info('[danmaku-enhance] 已安装弹幕拦截', {
     sameWindow: page === window,
     hookUrl: SEG_PATH.source,
-    responseHooked: (XmlHttpRequestCtor.prototype as any).__kdResponsePatched === true,
+    responseHooked: !!hooked && (hooked.holder as any).__kdResponsePatched === true,
+    hookNote: state.stats.hook,
   })
 }

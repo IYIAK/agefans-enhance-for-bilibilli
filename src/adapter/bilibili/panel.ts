@@ -333,6 +333,8 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
           stats.xhrs > 0
             ? '｜XHR 已开闸但播放器没读 response'
             : '｜fetch 已开闸但没走到合并'
+        if (stats.hook && stats.hook !== 'ok') sub += `｜hook：${stats.hook}`
+        if (stats.lastState) sub += `｜${stats.lastState}`
       }
       statusSub.textContent = sub
       return
