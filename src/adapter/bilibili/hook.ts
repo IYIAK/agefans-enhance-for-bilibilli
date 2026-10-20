@@ -367,10 +367,19 @@ function buildInjections(
   const result = pickComments(candidates, request, nativeElems)
   const { picked: elems } = result
   if (!elems.length) {
+    // 候选时间范围能一眼看出「这一段本来就没弹幕」还是「时间轴整体错位」
+    let min = Infinity
+    let max = -Infinity
+    for (const item of candidates) {
+      if (item.timeMs < min) min = item.timeMs
+      if (item.timeMs > max) max = item.timeMs
+    }
     return detail(
       `候选 ${candidates.length} 条全被丢弃（窗外 ${result.outOfWindow}／撞原生 ${result.dupNative}／自撞 ${result.dupInjected}／空 ${result.empty}；本段 ${Math.round(
         request.startMs / 1000
-      )}-${Math.round(request.endMs / 1000)}s，原生 ${nativeElems.length} 条）`
+      )}-${Math.round(request.endMs / 1000)}s，原生 ${nativeElems.length} 条，候选 ${(
+        min / 1000
+      ).toFixed(1)}-${(max / 1000).toFixed(1)}s）`
     )
   }
 
