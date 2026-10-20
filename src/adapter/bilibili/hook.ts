@@ -645,17 +645,26 @@ function trackRequest(xhr: XHRWithContext, request: SegRequest) {
   }
 }
 
+/**
+ * 等匹配出结果。播放器往往在弹弹play 返回之前就请求了第一段，
+ * 现在请求由我们接管，可以放心地等数据到齐再回填回调。
+ */
 async function waitForLoading() {
-  const loading = state.loading
-  if (!loading || state.comments) return
-
-  await Promise.race([
-    loading.then(
+  if (state.comments) return
+  const deadline = Date.now() + LOAD_WAIT_MS
+  while (!state.comments && Date.now() < deadline) {
+    const loading = state.loading
+    if (!loading) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 100))
+      continue
+    }
+    await loading.then(
       () => undefined,
       () => undefined
-    ),
-    new Promise<void>((resolve) => setTimeout(resolve, LOAD_WAIT_MS)),
-  ])
+    )
+    // 这一轮匹配已经结束却没有结果（没匹配上），继续等也没意义
+    if (!state.comments && state.loading === loading) break
+  }
 }
 
 // ── 接手整个 XHR（思路来自 pakku.js）────────────────────────
@@ -876,6 +885,9 @@ function patchXHR(target?: any): boolean {
         }
         return
       }
+
+      // 字节已经到手，可以安心等匹配结果——播放器不拿到回调就不会走
+      await waitForLoading()
 
       let merged = bytes
       try {
