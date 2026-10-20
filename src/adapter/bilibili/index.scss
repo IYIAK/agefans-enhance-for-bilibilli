@@ -42,8 +42,12 @@
     position: fixed;
     z-index: 100002;
     box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
     max-height: 70vh;
-    overflow-y: auto;
+    // 滚动交给 __body：面板自己滚会把标题栏和右边的叉一起滚走，
+    // 滚动条还会压在叉上面
+    overflow: hidden;
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 8px;
     background: #18191c;
@@ -60,14 +64,14 @@
   }
 
   &__header {
-    position: sticky;
-    top: 0;
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 10px;
+    padding: 8px 10px 8px 12px;
     background: rgba(24, 25, 28, 0.98);
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px 8px 0 0;
   }
 
   &__title {
@@ -95,10 +99,32 @@
   }
 
   &__body {
+    flex: 1 1 auto;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     gap: 8px;
     padding: 10px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border-radius: 0 0 8px 8px;
+
+    // 滚动条收窄一点，别压到右侧内容
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+
+    &::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    &::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      border-radius: 3px;
+      background: rgba(255, 255, 255, 0.22);
+    }
   }
 
   &__row {

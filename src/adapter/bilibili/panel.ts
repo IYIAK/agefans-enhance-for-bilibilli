@@ -312,21 +312,21 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     switchRow,
     dedupeRow,
     status,
+    ddpTitle,
+    searchRow,
+    candidates,
+    episodeSelect,
+    matchTip,
+    urlTitle,
+    urlInputRow,
+    urlList,
+    urlTip,
     filterTitle,
     keywordBox,
     modeRow,
     mergeRow,
     densityRow,
-    filterTip,
-    urlTitle,
-    urlInputRow,
-    urlList,
-    urlTip,
-    ddpTitle,
-    searchRow,
-    candidates,
-    episodeSelect,
-    matchTip
+    filterTip
   )
   panel.append(header, body)
 
@@ -457,8 +457,10 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   })
   closeBtn.addEventListener('click', () => open(false))
   panel.addEventListener('click', (e) => e.stopPropagation())
-  document.addEventListener('mousedown', onDocumentMouseDown)
-  document.addEventListener('click', onDocumentClick)
+  // 用捕获阶段：B 站播放器在 click 上 stopPropagation（点画面=播放/暂停），
+  // 冒泡到 document 的监听收不到，面板就永远关不上。
+  document.addEventListener('mousedown', onDocumentMouseDown, true)
+  document.addEventListener('click', onDocumentClick, true)
   window.addEventListener('resize', onResize)
 
   // ── 开关 ────────────────────────────────────────────────
@@ -965,8 +967,8 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     dispose() {
       detached = true
       if (anchorTimer !== undefined) window.clearTimeout(anchorTimer)
-      document.removeEventListener('click', onDocumentClick)
-      document.removeEventListener('mousedown', onDocumentMouseDown)
+      document.removeEventListener('click', onDocumentClick, true)
+      document.removeEventListener('mousedown', onDocumentMouseDown, true)
       window.removeEventListener('resize', onResize)
       onBodyMutation.disconnect()
       unsubscribe()
