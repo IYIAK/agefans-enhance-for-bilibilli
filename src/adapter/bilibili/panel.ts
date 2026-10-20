@@ -316,13 +316,21 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     }
     if (anime && episode) {
       statusMain.textContent = `${anime.name} · ${episode.name}`
-      // 分成两种：拦截到几次请求 / 实际合并了几段几条
-      if (stats.requests) {
-        statusSub.textContent = `拦截 ${stats.requests} 次请求 · 合并 ${stats.segments} 段 / ${stats.injected} 条`
-      } else {
-        statusSub.textContent =
-          reloadHint || '还没拦截到弹幕请求（播放器可能已缓存本段）'
+      // 三级诊断：有没有拦到请求 → 开关是否在手 → 播放器有没有读响应 → 合并多少
+      const parts: string[] = []
+      parts.push(`请求 ${stats.requests}`)
+      parts.push(`开闸 ${stats.armed}`)
+      parts.push(`读取 ${stats.reads}`)
+      parts.push(`合并 ${stats.segments} 段/${stats.injected} 条`)
+      let sub = parts.join(' · ')
+      if (stats.lastDetail) sub += `｜${stats.lastDetail}`
+      // 开关晚于请求打开时，播放器已经缓存了本段，必须重新请求才会经过拦截
+      if (stats.requests > 0 && stats.armed === 0) {
+        sub += '｜本段在开关打开前就请求过了，刷新页面即可生效'
+      } else if (stats.armed > 0 && stats.reads === 0 && !reloading) {
+        sub += '｜请求已开闸但播放器没读响应'
       }
+      statusSub.textContent = sub
       return
     }
     if (anime) {

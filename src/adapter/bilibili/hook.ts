@@ -31,10 +31,16 @@ interface SegRequest {
 interface HookStats {
   /** 拦截到的弹幕分段请求数（不管开关是否开启都统计） */
   requests: number
+  /** 开关已开启时发出的分段请求数（这些才会走注入逻辑） */
+  armed: number
+  /** 播放器真正读取响应的次数（证明影子 getter 被走到了） */
+  reads: number
   /** 实际合并过的分段数 */
   segments: number
   /** 实际注入的弹幕条数 */
   injected: number
+  /** 最近一次合并被丢弃的原因，用于面板上直接显示 */
+  lastDetail: string
 }
 
 interface HookState {
@@ -54,7 +60,7 @@ const state: HookState = {
   dedupe: true,
   comments: null,
   loading: null,
-  stats: { requests: 0, segments: 0, injected: 0 },
+  stats: { requests: 0, armed: 0, reads: 0, segments: 0, injected: 0, lastDetail: '' },
 }
 
 let installed = false
@@ -100,7 +106,7 @@ export function resetPageState() {
   state.comments = null
   state.loading = null
   state.cid = undefined
-  state.stats = { requests: 0, segments: 0, injected: 0 }
+  state.stats = { requests: 0, armed: 0, reads: 0, segments: 0, injected: 0, lastDetail: '' }
 }
 
 function toNumber(value: string | null): number | undefined {
@@ -125,7 +131,14 @@ function parseSegRequest(rawUrl: string): SegRequest | undefined {
   const ps = toNumber(params.get('ps'))
   const pe = toNumber(params.get('pe'))
 
-  if (ps !== undefined && pe !== undefined && pe > ps) {
+  // ps/pe 正常情况下是毫秒，但也见过按秒传的（窗口只有 360），
+  // 用「跨度至少 30 秒」来区分，避免把整段弹幕都过滤掉
+  if (
+    ps !== undefined &&
+    pe !== undefined &&
+    pe > ps &&
+    pe - ps >= 30 * 1000
+  ) {
     return { oid, startMs: ps, endMs: pe }
   }
 
@@ -212,11 +225,23 @@ function candidatesFromComments(comments: Comment[]): Candidate[] {
   }))
 }
 
+interface PickResult {
+  picked: InjectElem[]
+  /** 因不在本段时间窗内被丢掉的条数 */
+  outOfWindow: number
+  /** 因与原生弹幕重复被丢掉的条数 */
+  dupNative: number
+  /** 因与已注入弹幕重复被丢掉的条数 */
+  dupInjected: number
+  /** 空文本 */
+  empty: number
+}
+
 function pickComments(
   candidates: Candidate[],
   request: SegRequest,
   nativeElems: NativeElem[]
-): InjectElem[] {
+): PickResult {
   const nativeTimes = new Map<string, number[]>()
   for (const elem of nativeElems) {
     addTime(nativeTimes, normalizeText(elem.text), elem.timeMs)
@@ -224,20 +249,36 @@ function pickComments(
 
   const injectedTimes = new Map<string, number[]>()
   const picked: InjectElem[] = []
+  let outOfWindow = 0
+  let dupNative = 0
+  let dupInjected = 0
+  let empty = 0
 
   for (const item of candidates) {
     if (picked.length >= MAX_PER_SEGMENT) break
 
     const { timeMs } = item
-    if (timeMs < request.startMs || timeMs >= request.endMs) continue
+    if (timeMs < request.startMs || timeMs >= request.endMs) {
+      outOfWindow++
+      continue
+    }
 
     const text = item.text
-    if (!text) continue
+    if (!text) {
+      empty++
+      continue
+    }
 
     const key = normalizeText(text)
     if (state.dedupe) {
-      if (hasNear(nativeTimes, key, timeMs, NATIVE_DEDUPE_MS)) continue
-      if (hasNear(injectedTimes, key, timeMs, INJECT_DEDUPE_MS)) continue
+      if (hasNear(nativeTimes, key, timeMs, NATIVE_DEDUPE_MS)) {
+        dupNative++
+        continue
+      }
+      if (hasNear(injectedTimes, key, timeMs, INJECT_DEDUPE_MS)) {
+        dupInjected++
+        continue
+      }
     }
 
     picked.push({
@@ -251,31 +292,57 @@ function pickComments(
     addTime(injectedTimes, key, timeMs)
   }
 
-  return picked
+  return { picked, outOfWindow, dupNative, dupInjected, empty }
+}
+
+/** 记录本次合并被丢弃的原因，面板上直接展示，方便一轮定位 */
+function detail(reason: string) {
+  state.stats.lastDetail = reason
+  return null
 }
 
 function buildInjections(
   request: SegRequest,
   bytes: Uint8Array
 ): Uint8Array | null {
-  if (!state.enabled) return null
+  if (!state.enabled) return detail('开关未开启')
   // 请求的 cid 和当前页面不一致（比如预加载下一集）时不合并
-  if (state.cid && request.oid && state.cid !== request.oid) return null
+  if (state.cid && request.oid && state.cid !== request.oid) {
+    return detail(`cid 不匹配：页面 ${state.cid} / 请求 ${request.oid}`)
+  }
 
   // 弹弹play 和 URL 来源可以同时生效
-  const candidates = [
-    ...(state.comments ? candidatesFromComments(state.comments) : []),
-    ...collectItems(),
-  ]
-  if (!candidates.length) return null
+  const fromComments = state.comments ? candidatesFromComments(state.comments) : []
+  let fromUrls: Candidate[] = []
+  try {
+    fromUrls = collectItems()
+  } catch (error) {
+    return detail(`读取 URL 源失败：${(error as Error)?.message || error}`)
+  }
+  const candidates = [...fromComments, ...fromUrls]
+  if (!candidates.length) {
+    return detail(
+      `没有候选弹幕（弹弹play ${state.comments ? state.comments.length : 0} 条 / URL 源 ${
+        fromUrls.length
+      } 条）`
+    )
+  }
 
   const nativeElems = state.dedupe ? decodeElems(bytes) : []
-  const elems = pickComments(candidates, request, nativeElems)
-  if (!elems.length) return null
+  const result = pickComments(candidates, request, nativeElems)
+  const { picked: elems } = result
+  if (!elems.length) {
+    return detail(
+      `候选 ${candidates.length} 条全被丢弃（窗外 ${result.outOfWindow}／撞原生 ${result.dupNative}／自撞 ${result.dupInjected}／空 ${result.empty}；本段 ${Math.round(
+        request.startMs / 1000
+      )}-${Math.round(request.endMs / 1000)}s，原生 ${nativeElems.length} 条）`
+    )
+  }
 
   const merged = appendElems(bytes, elems)
   state.stats.segments++
   state.stats.injected += elems.length
+  state.stats.lastDetail = `本段注入 ${elems.length} 条`
   return merged
 }
 
@@ -283,6 +350,7 @@ function buildInjections(
 function countRequest(request: SegRequest | undefined) {
   if (!request) return
   state.stats.requests++
+  if (state.enabled) state.stats.armed++
 }
 
 /**
@@ -387,6 +455,41 @@ const RESPONSE_GETTER = Object.getOwnPropertyDescriptor(
 )?.get
 
 /**
+ * 跨 realm 时 `x instanceof ArrayBuffer` 会失效（页面那份 ArrayBuffer
+ * 和油猴沙箱的构造器不是同一个），所以按鸭子类型判断。
+ */
+function asBytes(raw: unknown): Uint8Array | null {
+  if (raw instanceof ArrayBuffer) return new Uint8Array(raw)
+  if (Object.prototype.toString.call(raw) !== '[object ArrayBuffer]') {
+    return null
+  }
+  try {
+    return new Uint8Array(raw as ArrayBuffer)
+  } catch (error) {
+    return null
+  }
+}
+
+
+/** 读取 raw response，跨 realm 时退回原型 getter */
+function readRawResponse(xhr: XHRWithContext): unknown {
+  const own = (xhr as any).__kdRawResponse
+  if (own !== undefined) return own
+  try {
+    if (RESPONSE_GETTER) return RESPONSE_GETTER.call(xhr)
+  } catch (error) {
+    // 跨 realm 调沙箱的 getter 会 Illegal invocation，退回直接读
+  }
+  try {
+    const proto = Object.getPrototypeOf(xhr) as any
+    const getter = Object.getOwnPropertyDescriptor(proto, 'response')?.get
+    return getter ? getter.call(xhr) : (xhr as any).response
+  } catch (error) {
+    return (xhr as any).response
+  }
+}
+
+/**
  * 用实例上的 getter 覆盖 xhr.response：播放器可能在我们之前注册
  * onreadystatechange，所以必须在 send 前就把 getter 装好，读取时再合并。
  */
@@ -399,24 +502,32 @@ function defineShadowResponse(xhr: XHRWithContext, request: SegRequest) {
       configurable: true,
       enumerable: true,
       get() {
-        const raw = RESPONSE_GETTER
-          ? RESPONSE_GETTER.call(xhr)
-          : (xhr as any).__kdRawResponse
+        state.stats.reads++
+        const raw = readRawResponse(xhr)
 
         if (computed) return result ?? raw
-        if (
-          !(raw instanceof ArrayBuffer) ||
-          xhr.readyState !== 4 ||
-          xhr.status !== 200
-        ) {
+        if (xhr.readyState !== 4) return raw
+        if (xhr.status !== 200) {
+          // 304 = 该分段没有弹幕，属于正常情况
+          if (xhr.status !== 304) state.stats.lastDetail = `响应状态 ${xhr.status}`
+          return raw
+        }
+
+        const bytes = asBytes(raw)
+        if (!bytes) {
+          state.stats.lastDetail = `响应不是 ArrayBuffer（responseType=${JSON.stringify(
+            (xhr as any).responseType
+          )}，实际 ${Object.prototype.toString.call(raw)}）`
           return raw
         }
 
         computed = true
         try {
-          const merged = buildInjections(request, new Uint8Array(raw))
+          const merged = buildInjections(request, bytes)
           if (merged) result = toArrayBuffer(merged)
         } catch (error) {
+          const msg = (error as Error)?.message || String(error)
+          state.stats.lastDetail = `合并异常：${msg}`
           console.warn('[danmaku-enhance] 合并弹幕失败', error)
         }
         return result ?? raw
@@ -474,15 +585,21 @@ function patchXHR(target?: any): boolean {
     }
 
     const xhr = this
+    // 先同步装好 getter：一旦进入异步等待，播放器可能 abort/复用这个 xhr，
+    // 等回来时 readyState 已不是 1，就再也没机会合并了。
+    defineShadowResponse(xhr, request)
+
     void (async () => {
       await waitForLoading()
-      // 等待期间可能被 abort 或复用
-      if (xhr.readyState !== 1) return
-
-      defineShadowResponse(xhr, request)
+      if (xhr.readyState !== 1) {
+        // 已经完成或已被 abort，getter 装不上了
+        state.stats.lastDetail = `发送时 readyState=${xhr.readyState}（等待期间已被处理或取消）`
+        return
+      }
       try {
         originalSend.call(xhr, body as any)
       } catch (error) {
+        state.stats.lastDetail = `发送失败：${(error as Error)?.message || error}`
         console.warn('[danmaku-enhance] 发送弹幕请求失败', error)
       }
     })()
