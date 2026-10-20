@@ -330,6 +330,18 @@ function pickComments(
   return { picked, outOfWindow, dupNative, dupInjected, empty }
 }
 
+/** 当前播放位置（毫秒），拿不到返回 -1 */
+function playbackMs() {
+  try {
+    const video = document.querySelector('video') as HTMLVideoElement | null
+    return video && isFinite(video.currentTime)
+      ? Math.round(video.currentTime * 1000)
+      : -1
+  } catch (error) {
+    return -1
+  }
+}
+
 /** 记录本次合并被丢弃的原因，面板上直接展示，方便一轮定位 */
 function detail(reason: string) {
   state.stats.lastDetail = reason
@@ -367,6 +379,19 @@ function buildInjections(
   const result = pickComments(candidates, request, nativeElems)
   const { picked: elems } = result
   if (!elems.length) {
+    // 打开右侧弹幕列表会一次性预取全部分段，那些段落在播放位置之外，
+    // 本来就没有候选弹幕，不该显示成「全被丢弃」。
+    const now = playbackMs()
+    const ahead = now >= 0 && request.startMs > now + 30 * 1000
+    const behind = now >= 0 && request.endMs < now - 60 * 1000
+    if (ahead || behind) {
+      return detail(
+        `预取段（当前播放 ${Math.round(now / 1000)}s，本段 ${Math.round(
+          request.startMs / 1000
+        )}-${Math.round(request.endMs / 1000)}s），无需注入`
+      )
+    }
+
     // 候选时间范围能一眼看出「这一段本来就没弹幕」还是「时间轴整体错位」
     let min = Infinity
     let max = -Infinity
