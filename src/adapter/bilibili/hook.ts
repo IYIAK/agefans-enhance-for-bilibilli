@@ -1,8 +1,8 @@
 import type { Comment } from '../../player/plugins/danmaku/types'
-import { applyFilter, isSimilar, loadFilter } from './filters'
-import type { FilterConfig } from './filters'
-import { appendElems, decodeElems } from './proto'
-import type { InjectElem, NativeElem } from './proto'
+import { applyDensity, createBlockChecker, isSimilar, loadFilter } from './filters'
+import type { FilterConfig, FilterTarget } from './filters'
+import { decodeReply, rebuildReply, replaceElemText } from './proto'
+import type { InjectElem } from './proto'
 import { collectItems } from './sources/state'
 
 /**
@@ -57,6 +57,8 @@ interface HookStats {
   available: number
   /** 被过滤器拦下的条数（屏蔽词 + 类型 + 密度） */
   filtered: number
+  /** 从原生响应里剔除掉的条数（过滤器对原生弹幕生效） */
+  droppedNative: number
   /** 被合并掉的重复弹幕条数 */
   merged: number
   /** 最近一次分段请求的生命周期（readyState/status/是否被中止/是否读了 response） */
@@ -154,6 +156,7 @@ function emptyStats(): HookStats {
     lastMergedSeg: null,
     available: 0,
     filtered: 0,
+    droppedNative: 0,
     merged: 0,
     lastState: '',
     hook: '',
@@ -278,44 +281,76 @@ function candidatesFromComments(comments: Comment[]): Candidate[] {
 }
 
 interface PickResult {
-  picked: InjectElem[]
-  /** 因不在本段时间窗内被丢掉的条数 */
+  /** 最终要写进响应的字节；null 表示无需改写 */
+  bytes: Uint8Array | null
+  /** 注入的第三方弹幕条数 */
+  injected: number
+  /** 从原生弹幕里删掉的条数（过滤器对原生生效） */
+  droppedNative: number
+  /** 因不在本段时间窗内被丢掉的候选条数 */
   outOfWindow: number
-  /** 被屏蔽词 / 类型开关 / 密度上限丢掉的条数 */
+  /** 候选被屏蔽词 / 类型开关 / 密度上限丢掉的条数 */
   filtered: number
-  /** 与相同时段内其他弹幕合并掉的条数 */
+  /** 候选与相同时段内其他弹幕合并掉的条数 */
   merged: number
-  /** 因与原生弹幕重复被丢掉的条数 */
+  /** 候选因与原生弹幕重复被丢掉的条数 */
   dupNative: number
-  /** 因与已注入弹幕重复被丢掉的条数 */
+  /** 候选因与已注入弹幕重复被丢掉的条数 */
   dupInjected: number
-  /** 空文本 */
+  /** 候选空文本 */
   empty: number
 }
 
-/** 合并时的分组：同一句只留一条代表，另外记下出现了几次 */
-interface Group {
+/** 统一时间线上的一条弹幕：可能来自原生响应，也可能来自第三方候选 */
+interface Entry {
   timeMs: number
-  mode: 1 | 4 | 5
-  color: number
+  mode: number
   text: string
+  /** >=0：原生记录下标；-1：第三方候选 */
+  nativeIndex: number
+  candidate?: Candidate
+  /** 被后面的近似弹幕合并到时，指向保留下来代表它的那条 */
+  absorbedBy?: Entry
   count: number
 }
 
+/**
+ * 一次分段合并的全部工作。
+ *
+ * 过滤器对「画面上的所有弹幕」生效，所以原生记录也走同一条管线：屏蔽词和类型
+ * 开关命中就从响应里剔掉，合并相似弹幕会把它的文字改成带计数的样子，每分钟上限
+ * 则是在原生 + 第三方合起来之后统一抽样。只有真的要改写时才重建响应。
+ */
 function pickComments(
   candidates: Candidate[],
   request: SegRequest,
-  nativeElems: NativeElem[],
+  raw: Uint8Array,
   filter: FilterConfig
 ): PickResult {
-  const nativeTimes = new Map<string, number[]>()
-  for (const elem of nativeElems) {
-    addTime(nativeTimes, normalizeText(elem.text), elem.timeMs)
-  }
+  const decoded = decodeReply(raw)
+  const blocked = createBlockChecker(filter)
 
+  // ── 1. 原生弹幕过屏蔽词 / 类型 ──────────────────────────
+  let blockedNative = 0
+  const entries: Entry[] = []
+  decoded.records.forEach((record, index) => {
+    if (blocked(record.elem)) {
+      blockedNative++
+      return
+    }
+    entries.push({
+      timeMs: record.elem.timeMs,
+      mode: record.elem.mode,
+      text: record.elem.text,
+      nativeIndex: index,
+      count: 1,
+    })
+  })
+
+  // ── 2. 候选弹幕：时间窗 + 空文本 + 屏蔽词 / 类型 ────────
   let outOfWindow = 0
   let empty = 0
-  const windowed: Candidate[] = []
+  let blockedCandidate = 0
   for (const item of candidates) {
     if (item.timeMs < request.startMs || item.timeMs >= request.endMs) {
       outOfWindow++
@@ -325,76 +360,146 @@ function pickComments(
       empty++
       continue
     }
-    windowed.push(item)
-  }
-
-  const outcome = applyFilter(windowed, filter)
-  const filtered =
-    outcome.blockedKeyword + outcome.blockedMode + outcome.blockedDensity
-
-  // 合并时段内内容相近的弹幕（pakku 的「合并重复弹幕」）
-  const windowMs = Math.max(0, filter.mergeWindowSec) * 1000
-  const groups: Group[] = []
-  let merged = 0
-  for (const item of outcome.kept) {
-    let hit: Group | undefined
-    if (filter.enabled && filter.mergeSimilar && windowMs > 0) {
-      for (let i = groups.length - 1; i >= 0; i--) {
-        const group = groups[i]
-        if (item.timeMs - group.timeMs > windowMs) break
-        if (group.mode !== item.mode) continue
-        if (isSimilar(group.text, item.text)) {
-          hit = group
-          break
-        }
-      }
-    }
-    if (hit) {
-      hit.count++
-      merged++
+    if (blocked(item)) {
+      blockedCandidate++
       continue
     }
-    groups.push({ ...item, count: 1 })
+    entries.push({
+      timeMs: item.timeMs,
+      mode: item.mode,
+      text: item.text,
+      nativeIndex: -1,
+      candidate: item,
+      count: 1,
+    })
   }
 
-  const injectedTimes = new Map<string, number[]>()
-  const picked: InjectElem[] = []
+  // ── 3. 去重：候选撞原生、以及多个来源之间互相撞 ──────────
+  const nativeTimes = new Map<string, number[]>()
+  for (const entry of entries) {
+    if (entry.nativeIndex < 0) continue
+    addTime(nativeTimes, normalizeText(entry.text), entry.timeMs)
+  }
+
   let dupNative = 0
   let dupInjected = 0
-
-  for (const group of groups) {
-    if (picked.length >= MAX_PER_SEGMENT) break
-
-    const { timeMs } = group
-    const key = normalizeText(group.text)
-    if (state.dedupe) {
-      if (hasNear(nativeTimes, key, timeMs, NATIVE_DEDUPE_MS)) {
+  if (state.dedupe) {
+    const injectedTimes = new Map<string, number[]>()
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i]
+      if (entry.nativeIndex >= 0) continue
+      const key = normalizeText(entry.text)
+      if (hasNear(nativeTimes, key, entry.timeMs, NATIVE_DEDUPE_MS)) {
         dupNative++
-        continue
-      }
-      if (hasNear(injectedTimes, key, timeMs, INJECT_DEDUPE_MS)) {
-        dupInjected++
-        continue
+        entries.splice(i, 1)
       }
     }
-
-    // 合并过的弹幕在末尾标出次数，和 pakku 的「显示合并数」一致
-    const text = group.count > 1 ? `${group.text} (${group.count})` : group.text
-    picked.push({
-      timeMs,
-      mode: group.mode,
-      color: group.color,
-      text,
-      dmid: makeDmid(group.text, timeMs),
-      oid: request.oid,
-    })
-    addTime(injectedTimes, key, timeMs)
+    // 倒序删完后重排，再按时间顺序做来源间去重（先来的留下）
+    entries.sort((a, b) => a.timeMs - b.timeMs)
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i]
+      if (entry.nativeIndex >= 0) continue
+      const key = normalizeText(entry.text)
+      if (hasNear(injectedTimes, key, entry.timeMs, INJECT_DEDUPE_MS)) {
+        dupInjected++
+        entries.splice(i, 1)
+        continue
+      }
+      addTime(injectedTimes, key, entry.timeMs)
+    }
+  } else {
+    for (const entry of entries) {
+      if (entry.nativeIndex >= 0) continue
+      addTime(nativeTimes, normalizeText(entry.text), entry.timeMs)
+    }
   }
 
+  // ── 4. 合并相似弹幕（原生与第三方放在同一时间线上）──────
+  // 时间要正序，才能只朝后看固定窗口
+  entries.sort((a, b) => a.timeMs - b.timeMs)
+
+  const windowMs = Math.max(0, filter.mergeWindowSec) * 1000
+  const reps: Entry[] = []
+  let merged = 0
+  const mergeOn = filter.enabled && filter.mergeSimilar && windowMs > 0
+
+  for (const entry of entries) {
+    if (mergeOn) {
+      for (let i = reps.length - 1; i >= 0; i--) {
+        const rep = reps[i]
+        if (entry.timeMs - rep.timeMs > windowMs) break
+        if (rep.mode !== entry.mode) continue
+        if (!isSimilar(rep.text, entry.text)) continue
+        rep.count++
+        entry.absorbedBy = rep
+        merged++
+        break
+      }
+      if (entry.absorbedBy) continue
+    }
+    reps.push(entry)
+  }
+
+  // ── 5. 每分钟上限：原生 + 第三方放在一起抽样 ────────────
+  const slots: (FilterTarget & { entry: Entry })[] = reps.map((entry) => ({
+    timeMs: entry.timeMs,
+    mode: entry.mode,
+    text: entry.count > 1 ? `${entry.text} (${entry.count})` : entry.text,
+    entry,
+  }))
+  const survived = new Set(applyDensity(slots, filter.perMinute).kept)
+
+  // ── 6. 落成最终的响应 ──────────────────────────────────
+  const finalBodies = new Array<Uint8Array | null>(decoded.records.length).fill(null)
+  const finalInjected: InjectElem[] = []
+  let injected = 0
+  let droppedNative = 0
+  // 原生是否被改写过（被屏蔽的、被密度抽掉的、合并后改文字的），
+  // 只要有一条就算改写，否则原样返回这次响应
+  let nativeChanged = blockedNative > 0
+
+  for (const slot of slots) {
+    if (!survived.has(slot)) {
+      if (slot.entry.nativeIndex >= 0) {
+        droppedNative++
+        nativeChanged = true
+      }
+      continue
+    }
+    const { entry } = slot
+    if (entry.nativeIndex >= 0) {
+      // 计数大于 1 时要改文字，其余字段按原字节保留
+      if (entry.count > 1) {
+        finalBodies[entry.nativeIndex] = replaceElemText(
+          decoded.records[entry.nativeIndex].body,
+          `${entry.text} (${entry.count})`
+        )
+        nativeChanged = true
+      } else {
+        finalBodies[entry.nativeIndex] = decoded.records[entry.nativeIndex].body
+      }
+      continue
+    }
+    if (injected >= MAX_PER_SEGMENT) continue
+    injected++
+    finalInjected.push({
+      timeMs: entry.timeMs,
+      mode: entry.mode,
+      color: entry.candidate?.color ?? 0xffffff,
+      text: slot.text,
+      dmid: makeDmid(entry.text, entry.timeMs),
+      oid: request.oid,
+    })
+  }
+
+  const changed = nativeChanged || finalInjected.length > 0
+
   return {
-    picked,
+    bytes: changed ? rebuildReply(decoded, (_elem, index) => finalBodies[index], finalInjected) : null,
+    injected: finalInjected.length,
+    droppedNative,
     outOfWindow,
-    filtered,
+    filtered: blockedNative + blockedCandidate,
     merged,
     dupNative,
     dupInjected,
@@ -440,23 +545,22 @@ function buildInjections(
     return detail(`读取 URL 源失败：${(error as Error)?.message || error}`)
   }
   const candidates = [...fromComments, ...fromUrls]
-  if (!candidates.length) {
-    return detail(
-      `没有候选弹幕（弹弹play ${state.comments ? state.comments.length : 0} 条 / URL 源 ${
-        fromUrls.length
-      } 条）`
-    )
-  }
   // 合并要求按时间有序，两路来源各自有序但拼起来不一定
   candidates.sort((a, b) => a.timeMs - b.timeMs)
 
-  const nativeElems = state.dedupe ? decodeElems(bytes) : []
+  // 即使一个候选都没有也要继续：过滤器要作用在原生弹幕上，
+  // 「没有第三方弹幕」不等于「这段响应不用改」。
   state.stats.available = candidates.length
-  const result = pickComments(candidates, request, nativeElems, loadFilter())
-  const { picked: elems } = result
+  const result = pickComments(candidates, request, bytes, loadFilter())
   if (result.filtered) state.stats.filtered += result.filtered
   if (result.merged) state.stats.merged += result.merged
-  if (!elems.length) {
+  if (result.droppedNative) state.stats.droppedNative += result.droppedNative
+
+  if (!result.bytes) {
+    const nativeTotal = decodeReply(bytes).records.length
+    if (!candidates.length) {
+      return detail(`没有候选弹幕，原生 ${nativeTotal} 条也不需要过滤，本段原样放行`)
+    }
     // 打开右侧弹幕列表会一次性预取全部分段，那些段落在播放位置之外，
     // 本来就没有候选弹幕，不该显示成「全被丢弃」。
     const now = playbackMs()
@@ -480,18 +584,26 @@ function buildInjections(
     return detail(
       `候选 ${candidates.length} 条全被丢弃（窗外 ${result.outOfWindow}／过滤 ${result.filtered}／合并 ${result.merged}／撞原生 ${result.dupNative}／自撞 ${result.dupInjected}／空 ${result.empty}；本段 ${Math.round(
         request.startMs / 1000
-      )}-${Math.round(request.endMs / 1000)}s，原生 ${nativeElems.length} 条，候选 ${(
+      )}-${Math.round(request.endMs / 1000)}s，原生 ${nativeTotal} 条，候选 ${(
         min / 1000
       ).toFixed(1)}-${(max / 1000).toFixed(1)}s）`
     )
   }
 
-  const merged = appendElems(bytes, elems)
   state.stats.segments++
-  state.stats.injected += elems.length
+  state.stats.injected += result.injected
   state.stats.lastMergedSeg = request.index ?? null
-  state.stats.lastDetail = `本段注入 ${elems.length} 条`
-  return merged
+  const touches = [
+    result.droppedNative ? `密度裁剪原生 ${result.droppedNative}` : '',
+    result.filtered ? `过滤 ${result.filtered}` : '',
+    result.merged ? `合并 ${result.merged}` : '',
+  ]
+    .filter(Boolean)
+    .join('，')
+  state.stats.lastDetail = result.injected
+    ? `本段注入 ${result.injected} 条${touches ? `，${touches}` : ''}`
+    : `本段未注入${touches ? `，只做了${touches}` : ''}`
+  return result.bytes
 }
 
 /** 记一次弹幕分段请求（不管开关是否开启都记，方便诊断） */

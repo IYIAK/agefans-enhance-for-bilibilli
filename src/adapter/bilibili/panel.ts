@@ -199,7 +199,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     filterConfig.enabled ? '已启用' : '已关闭'
   )
   filterToggle.type = 'button'
-  filterToggle.title = '过滤只作用于第三方弹幕，不影响 B 站原生弹幕'
+  filterToggle.title = '过滤对原生与第三方弹幕一起生效'
   const filterReload = el('button', `${ROOT_CLASS}__icon-text`, '重新加载')
   filterReload.type = 'button'
   filterReload.title = '让播放器重新请求当前分段，新设置立刻生效'
@@ -302,8 +302,8 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     saveFilter(filterConfig)
     filterToggle.textContent = filterConfig.enabled ? '已启用' : '已关闭'
     filterTip.textContent = filterConfig.enabled
-      ? '已启用：屏蔽词 / 类型 / 合并 / 密度都会生效'
-      : '已关闭：第三方弹幕原样注入'
+      ? '已启用：屏蔽词 / 类型 / 合并 / 密度对原生和第三方弹幕一起生效'
+      : '已关闭：原生弹幕与注入弹幕都原样显示'
     render()
   })
 
@@ -525,7 +525,8 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       `接管 ${stats.reads}`,
       `通道 xhr${stats.xhrs}/fetch${stats.fetches}`,
       `合并 ${stats.segments} 段/${stats.injected} 条`,
-      `过滤 ${stats.filtered} 条／合并重复 ${stats.merged} 条`,
+      `过滤 ${stats.filtered} 条／合并重复 ${stats.merged} 条` +
+        (stats.droppedNative ? `／密度裁剪 ${stats.droppedNative} 条` : ''),
       `段 ${stats.lastSeg ?? '-'}／合至 ${stats.lastMergedSeg ?? '-'}`,
     ]
     let line = parts.join(' · ')
@@ -557,18 +558,24 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     if (anime && episode) {
       statusMain.textContent = `${anime.name} · ${episode.name}`
       // 平时只给人看得懂的一句话，技术细节收进「详情」
+      const extra = [
+        stats.filtered ? `过滤 ${stats.filtered}` : '',
+        stats.merged ? `合并 ${stats.merged}` : '',
+      ]
+        .filter(Boolean)
+        .join(' · ')
       if (stats.injected > 0) {
-        const extra = [
-          stats.filtered ? `过滤 ${stats.filtered}` : '',
-          stats.merged ? `合并 ${stats.merged}` : '',
-        ]
-          .filter(Boolean)
-          .join(' · ')
         statusSub.textContent = stats.available
           ? `本次共 ${stats.available} 条，已注入 ${stats.injected} 条${
               extra ? `（${extra}）` : ''
             }`
-          : `已注入 ${stats.injected} 条（${stats.segments} 段）`
+          : `已注入 ${stats.injected} 条（${stats.segments} 段）${
+              extra ? `（${extra}）` : ''
+            }`
+      } else if (stats.filtered > 0 || stats.droppedNative > 0) {
+        statusSub.textContent = `当前分段没有可注入的弹幕，过滤器已作用在原生弹幕上（过滤 ${
+          stats.filtered
+        }${stats.droppedNative ? ` · 密度裁剪 ${stats.droppedNative}` : ''}）`
       } else if (stats.requests === 0) {
         statusSub.textContent = '等待播放器请求弹幕…'
       } else if (stats.armed === 0) {

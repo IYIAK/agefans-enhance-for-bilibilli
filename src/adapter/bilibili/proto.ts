@@ -139,35 +139,67 @@ function decodeElem(buf: Uint8Array): NativeElem {
   return { timeMs, mode, color, text, dmid }
 }
 
-/** 解码一个分段响应里的原生弹幕（只取合并需要的字段） */
-export function decodeElems(buf: Uint8Array): NativeElem[] {
-  const elems: NativeElem[] = []
+/** 一条原生弹幕：保留原始字节，重新拼装时原样写回，未建模的字段不会丢 */
+export interface ReplyRecord {
+  /** DanmakuElem 的载荷（不含 field 1 的 tag 与长度头） */
+  body: Uint8Array
+  elem: NativeElem
+}
+
+export interface DecodedReply {
+  records: ReplyRecord[]
+  /** elems 之外的顶层字段（colorfulSrc 等），原样保留 */
+  others: Uint8Array[]
+}
+
+/**
+ * 拆开一个分段响应。
+ *
+ * 只解析需要判断的字段，但每条弹幕的原始字节都留着 —— 过滤原生弹幕时要重建
+ * 响应，重新编码会丢掉 weight/attr/animation/colorful 这些没建模的字段。
+ */
+export function decodeReply(buf: Uint8Array): DecodedReply {
+  const records: ReplyRecord[] = []
+  const others: Uint8Array[] = []
   let pos = 0
 
   while (pos < buf.length) {
+    const start = pos
     const key = readVarint(buf, pos)
     if (!key) break
     pos = key.next
     const field = Math.floor(key.value / 8)
     const wire = key.value % 8
 
-    if (field === 1 && wire === WIRE_LEN) {
+    if (wire === WIRE_LEN) {
       const len = readVarint(buf, pos)
       if (!len) break
-      const start = len.next
-      const end = start + len.value
+      const bodyStart = len.next
+      const end = bodyStart + len.value
       if (end > buf.length) break
-      elems.push(decodeElem(buf.subarray(start, end)))
+      if (field === 1) {
+        const body = buf.subarray(bodyStart, end)
+        records.push({ body, elem: decodeElem(body) })
+      } else {
+        // 整段原样留着，包括 tag 和长度头
+        others.push(buf.subarray(start, end))
+      }
       pos = end
       continue
     }
 
     const next = skipField(buf, pos, wire)
     if (next === undefined) break
+    others.push(buf.subarray(start, next))
     pos = next
   }
 
-  return elems
+  return { records, others }
+}
+
+/** 解码一个分段响应里的原生弹幕（只取合并需要的字段） */
+export function decodeElems(buf: Uint8Array): NativeElem[] {
+  return decodeReply(buf).records.map((record) => record.elem)
 }
 
 class ByteWriter {
@@ -231,16 +263,87 @@ function concat(parts: Uint8Array[]): Uint8Array {
   return out
 }
 
+function wrapElemBody(body: Uint8Array): Uint8Array[] {
+  const header = new ByteWriter()
+  header.tag(1, WIRE_LEN)
+  header.varint(body.length)
+  return [header.finish(), body]
+}
+
 /** 把注入弹幕追加为 DmSegMobileReply.elems（field 1） */
 export function appendElems(base: Uint8Array, elems: InjectElem[]): Uint8Array {
   if (!elems.length) return base
   const parts: Uint8Array[] = [base]
   for (const elem of elems) {
-    const body = encodeElem(elem)
-    const header = new ByteWriter()
-    header.tag(1, WIRE_LEN)
-    header.varint(body.length)
-    parts.push(header.finish(), body)
+    parts.push(...wrapElemBody(encodeElem(elem)))
   }
+  return concat(parts)
+}
+
+/**
+ * 重建分段响应。
+ *
+ * 与 appendElems 的区别是保留哪些原生弹幕由调用方决定 —— 过滤器要对原生
+ * 弹幕生效，就只能重建而不能追加。回调返回原始载荷表示原样写回，返回新载荷
+ * 表示替换（合并相似弹幕时要改文字），返回 null 表示丢掉这条。
+ */
+export function rebuildReply(
+  decoded: DecodedReply,
+  bodyOf: (elem: NativeElem, index: number) => Uint8Array | null,
+  inject: InjectElem[]
+): Uint8Array {
+  const parts: Uint8Array[] = []
+  for (let i = 0; i < decoded.records.length; i++) {
+    const record = decoded.records[i]
+    const body = bodyOf(record.elem, i)
+    if (!body) continue
+    parts.push(...wrapElemBody(body))
+  }
+  for (const elem of inject) {
+    parts.push(...wrapElemBody(encodeElem(elem)))
+  }
+  for (const other of decoded.others) parts.push(other)
+  return concat(parts)
+}
+
+/**
+ * 换掉一条原生记录的正文，其余字段按原字节拷贝。
+ *
+ * 合并相似弹幕时要在文字后面标出条数，但整体重新编码会丢掉没建模的字段，
+ * 所以只重写 field 7，其他部分一个字节都不动。
+ */
+export function replaceElemText(body: Uint8Array, text: string): Uint8Array {
+  const parts: Uint8Array[] = []
+  let pos = 0
+
+  while (pos < body.length) {
+    const start = pos
+    const key = readVarint(body, pos)
+    if (!key) break
+    pos = key.next
+    const field = Math.floor(key.value / 8)
+    const wire = key.value % 8
+
+    let end: number | undefined
+    if (wire === WIRE_LEN) {
+      const len = readVarint(body, pos)
+      if (!len) break
+      end = len.next + len.value
+      if (end > body.length) break
+    } else {
+      end = skipField(body, pos, wire)
+      if (end === undefined) break
+    }
+
+    if (field === 7 && wire === WIRE_LEN) {
+      const writer = new ByteWriter()
+      writer.stringField(7, text)
+      parts.push(writer.finish())
+    } else {
+      parts.push(body.subarray(start, end))
+    }
+    pos = end
+  }
+
   return concat(parts)
 }

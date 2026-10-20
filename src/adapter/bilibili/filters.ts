@@ -7,8 +7,9 @@
  * - 合并时间窗内内容相近的重复弹幕，对应 THRESHOLD / MAX_DIST / DANMU_MARK
  * - 每分钟条数上限，对应 SHRINK_THRESHOLD 一类密度控制
  *
- * 过滤发生在注入管线里（hook.ts 的 pickComments），所以只影响第三方弹幕，
- * B 站原生弹幕照旧由播放器自己处理。
+ * 过滤发生在注入管线里（hook.ts 的 pickComments），第三方弹幕与 B 站原生
+ * 弹幕走的是同一套规则：原生弹幕在重建响应时按同样的条件被剔除，
+ * 所以「屏蔽词」「屏蔽顶部」这类开关对画面上的所有弹幕一视同仁。
  */
 import { gm } from '../../utils/storage'
 
@@ -63,8 +64,21 @@ export function saveFilter(config: FilterConfig) {
 
 export interface FilterTarget {
   timeMs: number
-  mode: 1 | 4 | 5
+  /** B 站的 mode：1-3 滚动、4 底部、5 顶部、6 逆向、7 高级、8 代码、9 BAS */
+  mode: number
   text: string
+}
+
+export type ModeKind = 'scroll' | 'top' | 'bottom' | 'other'
+
+/** 把 B 站的 mode 归到面板上的三类开关 */
+export function modeKind(mode: number): ModeKind {
+  if (mode === 5) return 'top'
+  if (mode === 4) return 'bottom'
+  // 1-3 普通滚动、6 逆向滚动、7 高级、8 代码弹幕都跟着视频滚，算滚动类
+  if (mode >= 1 && mode <= 3) return 'scroll'
+  if (mode === 6) return 'scroll'
+  return 'other'
 }
 
 /** 一条已经编译好的屏蔽规则 */
@@ -159,66 +173,98 @@ export function isSimilar(a: string, b: string) {
   return dist <= 5 && dist / long <= 0.45
 }
 
-export interface FilterOutcome<T> {
+export type BlockReason = 'mode' | 'keyword' | null
+
+/**
+ * 编译成「这一条该不该拦」的判定函数。
+ *
+ * 用判定函数而不是批量过滤，是因为原生弹幕要按下标剔除 —— 它们的原始字节
+ * 需要按位置对应回 protobuf 记录。
+ */
+export function createBlockChecker(
+  config: FilterConfig
+): (item: FilterTarget) => BlockReason {
+  if (!config.enabled) return () => null
+
+  const rules = compileRules(config.keywords)
+  const { hideScroll, hideTop, hideBottom } = config
+
+  return (item) => {
+    const kind = modeKind(item.mode)
+    if (kind === 'scroll' && hideScroll) return 'mode'
+    if (kind === 'top' && hideTop) return 'mode'
+    if (kind === 'bottom' && hideBottom) return 'mode'
+    if (rules.length && rules.some((rule) => rule.test(item.text))) {
+      return 'keyword'
+    }
+    return null
+  }
+}
+
+export interface RuleOutcome<T> {
   kept: T[]
   /** 被屏蔽词拦下的条数 */
   blockedKeyword: number
   /** 被类型开关拦下的条数 */
   blockedMode: number
-  /** 因为每分钟上限被丢掉的条数 */
-  blockedDensity: number
 }
 
-/** 类型 / 屏蔽词 / 密度三道过滤；相似合并由调用方在时间窗内做 */
-export function applyFilter<T extends FilterTarget>(
+/**
+ * 屏蔽词 + 类型两道过滤。输入可以是第三方候选弹幕，也可以是解出来的原生
+ * 弹幕 —— 两边的 mode 都是 B 站的编号，对「屏蔽顶部/底部」的判定一致。
+ */
+export function applyRules<T extends FilterTarget>(
   items: T[],
   config: FilterConfig
-): FilterOutcome<T> {
+): RuleOutcome<T> {
   if (!config.enabled) {
-    return { kept: items, blockedKeyword: 0, blockedMode: 0, blockedDensity: 0 }
+    return { kept: items, blockedKeyword: 0, blockedMode: 0 }
   }
 
-  const rules = compileRules(config.keywords)
-  const kept: FilterOutcome<T>['kept'] = []
+  const check = createBlockChecker(config)
+  const kept: RuleOutcome<T>['kept'] = []
   let blockedKeyword = 0
   let blockedMode = 0
 
   for (const item of items) {
-    if (item.mode === 1 && config.hideScroll) {
-      blockedMode++
-      continue
-    }
-    if (item.mode === 5 && config.hideTop) {
-      blockedMode++
-      continue
-    }
-    if (item.mode === 4 && config.hideBottom) {
-      blockedMode++
-      continue
-    }
-    if (rules.length && rules.some((rule) => rule.test(item.text))) {
-      blockedKeyword++
-      continue
-    }
-    kept.push(item)
+    const reason = check(item)
+    if (reason === 'mode') blockedMode++
+    else if (reason === 'keyword') blockedKeyword++
+    else kept.push(item)
   }
 
-  const limit = Math.max(0, Math.round(config.perMinute))
-  if (!limit) {
-    return { kept, blockedKeyword, blockedMode, blockedDensity: 0 }
+  return { kept, blockedKeyword, blockedMode }
+}
+
+export interface DensityOutcome<T> {
+  kept: T[]
+  blocked: number
+}
+
+/**
+ * 每分钟条数上限。输入应当是「同一分段里已经合并好的全部弹幕」（原生 + 第三方），
+ * 这样画面上的密度才真的受控，而不是只限第三方那一半。
+ * 超出时按等间距抽样，保留分布而不是砍掉尾巴。
+ */
+export function applyDensity<T extends FilterTarget>(
+  items: T[],
+  perMinute: number
+): DensityOutcome<T> {
+  const limit = Math.max(0, Math.round(perMinute))
+  if (!limit || items.length <= limit) {
+    return { kept: items, blocked: 0 }
   }
 
-  // 每分钟超出上限时按等间距抽样，保留分布而不是砍掉尾巴
   const byMinute = new Map<number, T[]>()
-  for (const item of kept) {
+  for (const item of items) {
     const bucket = Math.floor(item.timeMs / 60000)
     const list = byMinute.get(bucket)
     if (list) list.push(item)
     else byMinute.set(bucket, [item])
   }
 
-  const result: FilterOutcome<T>['kept'] = []
-  let blockedDensity = 0
+  const result: DensityOutcome<T>['kept'] = []
+  let blocked = 0
   for (const list of byMinute.values()) {
     if (list.length <= limit) {
       result.push(...list)
@@ -230,9 +276,34 @@ export function applyFilter<T extends FilterTarget>(
       const idx = Math.min(list.length - 1, Math.floor((i + 0.5) * step))
       result.push(list[idx])
     }
-    blockedDensity += list.length - limit
+    blocked += list.length - limit
   }
 
   result.sort((a, b) => a.timeMs - b.timeMs)
-  return { kept: result, blockedKeyword, blockedMode, blockedDensity }
+  return { kept: result, blocked }
+}
+
+export interface FilterOutcome<T> {
+  kept: T[]
+  blockedKeyword: number
+  blockedMode: number
+  blockedDensity: number
+}
+
+/** 对单独一组弹幕跑完整的三道过滤，主要给测试与简单场景用 */
+export function applyFilter<T extends FilterTarget>(
+  items: T[],
+  config: FilterConfig
+): FilterOutcome<T> {
+  if (!config.enabled) {
+    return { kept: items, blockedKeyword: 0, blockedMode: 0, blockedDensity: 0 }
+  }
+  const rules = applyRules(items, config)
+  const density = applyDensity(rules.kept, config.perMinute)
+  return {
+    kept: density.kept,
+    blockedKeyword: rules.blockedKeyword,
+    blockedMode: rules.blockedMode,
+    blockedDensity: density.blocked,
+  }
 }
