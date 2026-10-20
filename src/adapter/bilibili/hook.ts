@@ -51,6 +51,8 @@ interface HookStats {
   lastSeg: number | null
   /** 最近一次真正合并成功的分段序号 */
   lastMergedSeg: number | null
+  /** 当前来源总共可用的弹幕条数（不受分段窗口限制） */
+  available: number
   /** 最近一次分段请求的生命周期（readyState/status/是否被中止/是否读了 response） */
   lastState: string
   /** response getter 的安装结果，装不上时这里写原因 */
@@ -144,6 +146,7 @@ function emptyStats(): HookStats {
     lastDetail: '',
     lastSeg: null,
     lastMergedSeg: null,
+    available: 0,
     lastState: '',
     hook: '',
   }
@@ -383,6 +386,7 @@ function buildInjections(
   }
 
   const nativeElems = state.dedupe ? decodeElems(bytes) : []
+  state.stats.available = candidates.length
   const result = pickComments(candidates, request, nativeElems)
   const { picked: elems } = result
   if (!elems.length) {

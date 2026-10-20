@@ -208,6 +208,15 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   // ── 面板开关与定位 ──────────────────────────────────────
   let opened = false
 
+  /** 控制条高度，面板要整个浮在它上面，不能压住按钮 */
+  function controlBarHeight() {
+    const bar = document.querySelector(
+      '.bpx-player-control-bottom, .bpx-player-control-wrap, .bpx-player-control'
+    )
+    const height = bar ? bar.getBoundingClientRect().height : 0
+    return height > 0 ? height : 46
+  }
+
   function placePanel() {
     const player = findOne(PLAYER_SELECTORS)
     if (!player) {
@@ -217,11 +226,15 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       return
     }
     const rect = player.getBoundingClientRect()
-    const width = Math.min(340, Math.max(264, rect.width * 0.34))
+    const bar = controlBarHeight()
+    const width = Math.min(320, Math.max(280, rect.width * 0.3))
     panel.style.width = `${width}px`
-    panel.style.left = `${Math.max(8, rect.right - width - 12)}px`
+    panel.style.left = `${Math.max(8, rect.right - width - 8)}px`
     panel.style.right = 'auto'
-    panel.style.bottom = `${Math.max(8, window.innerHeight - rect.bottom + 52)}px`
+    // 底边贴着控制条上沿，和原生设置浮层一致
+    panel.style.bottom = `${Math.max(8, window.innerHeight - rect.bottom + bar + 8)}px`
+    // 面板高度不超过播放器可视区，避免超出画面
+    panel.style.maxHeight = `${Math.max(180, rect.height - bar - 16)}px`
   }
 
   function open(next: boolean) {
@@ -234,8 +247,30 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     }
   }
 
-  function onDocumentClick() {
-    if (opened) open(false)
+  // 面板里可能长时间输入/拖选文字：只有「在面板外按下并在面板外松开」
+  // 才算点外面，否则从输入框往外拖一下就误关了。
+  let pressedInside = false
+
+  function onDocumentMouseDown(e: MouseEvent) {
+    const target = e.target as Node
+    if (panel.contains(target) || button.contains(target)) {
+      pressedInside = true
+      return
+    }
+    pressedInside = false
+  }
+
+  function onDocumentClick(e: MouseEvent) {
+    if (!opened) return
+    const target = e.target as Node
+    if (panel.contains(target) || button.contains(target)) return
+    if (pressedInside) {
+      pressedInside = false
+      return
+    }
+    // 有选中文本时优先认为是拖选，不关面板
+    if ((window.getSelection()?.toString() || '').length > 0) return
+    open(false)
   }
 
   function onResize() {
@@ -248,6 +283,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   })
   closeBtn.addEventListener('click', () => open(false))
   panel.addEventListener('click', (e) => e.stopPropagation())
+  document.addEventListener('mousedown', onDocumentMouseDown)
   document.addEventListener('click', onDocumentClick)
   window.addEventListener('resize', onResize)
 
@@ -344,7 +380,9 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       statusMain.textContent = `${anime.name} · ${episode.name}`
       // 平时只给人看得懂的一句话，技术细节收进「详情」
       if (stats.injected > 0) {
-        statusSub.textContent = `已注入 ${stats.injected} 条（${stats.segments} 段）`
+        statusSub.textContent = stats.available
+          ? `本次共 ${stats.available} 条，已注入 ${stats.injected} 条`
+          : `已注入 ${stats.injected} 条（${stats.segments} 段）`
       } else if (stats.requests === 0) {
         statusSub.textContent = '等待播放器请求弹幕…'
       } else if (stats.armed === 0) {
@@ -722,6 +760,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       detached = true
       if (anchorTimer !== undefined) window.clearTimeout(anchorTimer)
       document.removeEventListener('click', onDocumentClick)
+      document.removeEventListener('mousedown', onDocumentMouseDown)
       window.removeEventListener('resize', onResize)
       onBodyMutation.disconnect()
       unsubscribe()
