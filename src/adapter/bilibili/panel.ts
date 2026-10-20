@@ -128,7 +128,15 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   const status = el('div', `${ROOT_CLASS}__status`)
   const statusMain = el('div', `${ROOT_CLASS}__status-main`)
   const statusSub = el('div', `${ROOT_CLASS}__status-sub`)
-  status.append(statusMain, statusSub)
+  const debugToggle = el('button', `${ROOT_CLASS}__debug-toggle`, '详情')
+  debugToggle.type = 'button'
+  const debugBox = el('div', `${ROOT_CLASS}__debug`)
+  debugBox.hidden = true
+  debugToggle.addEventListener('click', () => {
+    debugBox.hidden = !debugBox.hidden
+    debugToggle.textContent = debugBox.hidden ? '详情' : '收起'
+  })
+  status.append(statusMain, statusSub, debugToggle, debugBox)
 
   // URL 源
   const urlTitle = el('div', `${ROOT_CLASS}__section`, 'URL 弹幕源')
@@ -296,12 +304,30 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       : '先打开上面的开关'
   }
 
+  /** 「详情」里展开的技术细节 */
+  function debugLine(stats: ReturnType<typeof getStats>) {
+    const parts = [
+      `请求 ${stats.requests}`,
+      `开闸 ${stats.armed}`,
+      `接管 ${stats.reads}`,
+      `通道 xhr${stats.xhrs}/fetch${stats.fetches}`,
+      `合并 ${stats.segments} 段/${stats.injected} 条`,
+      `段 ${stats.lastSeg ?? '-'}／合至 ${stats.lastMergedSeg ?? '-'}`,
+    ]
+    let line = parts.join(' · ')
+    if (stats.lastDetail) line += `\n${stats.lastDetail}`
+    if (stats.lastState) line += `\n${stats.lastState}`
+    if (stats.hook && stats.hook !== 'ok') line += `\nhook：${stats.hook}`
+    return line
+  }
+
   function renderStatus() {
     const stats = getStats()
 
     if (!config.enabled) {
       statusMain.textContent = '未开启'
       statusSub.textContent = '打开开关后才会向播放器注入弹幕'
+      debugBox.textContent = ''
       return
     }
     if (busy && notice) {
@@ -316,28 +342,19 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     }
     if (anime && episode) {
       statusMain.textContent = `${anime.name} · ${episode.name}`
-      // 诊断：有没有拦到请求 → 走哪个通道 → 开关是否在手 → 合并多少
-      const parts: string[] = []
-      parts.push(`请求 ${stats.requests}`)
-      parts.push(`开闸 ${stats.armed}`)
-      parts.push(`通道 xhr${stats.xhrs}/fetch${stats.fetches}`)
-      parts.push(`接管 ${stats.reads}`)
-      parts.push(`合并 ${stats.segments} 段/${stats.injected} 条`)
-      parts.push(`段 ${stats.lastSeg ?? '-'}／合至 ${stats.lastMergedSeg ?? '-'}`)
-      let sub = parts.join(' · ')
-      if (stats.lastDetail) sub += `｜${stats.lastDetail}`
-      // 开关晚于请求打开时，播放器已经缓存了本段，必须重新请求才会经过拦截
-      if (stats.requests > 0 && stats.armed === 0) {
-        sub += '｜本段在开关打开前就请求过了，刷新页面即可生效'
-      } else if (stats.armed > 0 && stats.reads === 0) {
-        sub +=
-          stats.xhrs > 0
-            ? '｜XHR 已开闸但播放器没读 response'
-            : '｜fetch 已开闸但没走到合并'
-        if (stats.hook && stats.hook !== 'ok') sub += `｜hook：${stats.hook}`
-        if (stats.lastState) sub += `｜${stats.lastState}`
+      // 平时只给人看得懂的一句话，技术细节收进「详情」
+      if (stats.injected > 0) {
+        statusSub.textContent = `已注入 ${stats.injected} 条（${stats.segments} 段）`
+      } else if (stats.requests === 0) {
+        statusSub.textContent = '等待播放器请求弹幕…'
+      } else if (stats.armed === 0) {
+        statusSub.textContent = '本段在开关打开前已加载，刷新页面即可生效'
+      } else if (stats.reads === 0) {
+        statusSub.textContent = '已拦截请求，但还没有接管到响应'
+      } else {
+        statusSub.textContent = '已接管请求，当前分段没有可注入的弹幕'
       }
-      statusSub.textContent = sub
+      debugBox.textContent = debugLine(stats)
       return
     }
     if (anime) {

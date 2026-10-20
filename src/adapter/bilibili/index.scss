@@ -174,6 +174,31 @@
     font-size: 11px;
   }
 
+  &__debug-toggle {
+    margin-top: 4px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: #60a5fa;
+    font-size: 11px;
+    cursor: pointer;
+
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+
+  &__debug {
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 1px dashed rgba(255, 255, 255, 0.12);
+    color: #8b93a1;
+    font-size: 10px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
   &__section {
     margin-top: 2px;
     padding-top: 8px;
