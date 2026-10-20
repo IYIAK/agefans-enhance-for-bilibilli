@@ -397,9 +397,12 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     const width = Math.min(320, Math.max(280, (playerRect?.width || 640) * 0.32))
 
     // 底线 = 控制条上沿再往上一丢丢，和原生设置浮层同一层
-    const barTop = bar ? bar.top : (playerRect?.bottom ?? window.innerHeight) - 46
+    const barTop = bar ? bar.top : (playerRect?.bottom ?? window.innerHeight)
     const bottom = Math.max(8, window.innerHeight - barTop + 10)
-    const maxHeight = Math.max(160, window.innerHeight - bottom - 12)
+    // 上限：面板不能顶到播放器外面去
+    const topLimit = playerRect ? playerRect.top + 8 : 8
+    const available = Math.max(160, barTop - topLimit - 10)
+    const maxHeight = Math.min(available, window.innerHeight - bottom - 12)
 
     panel.style.width = `${width}px`
     panel.style.left = `${Math.max(8, right - width - 8)}px`
@@ -500,6 +503,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   }
 
   function render() {
+    if (opened) placePanel()
     renderStatus()
     renderCandidates()
     renderEpisodes()
