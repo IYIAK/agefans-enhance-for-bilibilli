@@ -35,6 +35,10 @@ interface HookStats {
   armed: number
   /** 播放器真正读取响应的次数（证明影子 getter 被走到了） */
   reads: number
+  /** 走 XHR 通道的分段请求数 */
+  xhrs: number
+  /** 走 fetch 通道的分段请求数 */
+  fetches: number
   /** 实际合并过的分段数 */
   segments: number
   /** 实际注入的弹幕条数 */
@@ -60,7 +64,7 @@ const state: HookState = {
   dedupe: true,
   comments: null,
   loading: null,
-  stats: { requests: 0, armed: 0, reads: 0, segments: 0, injected: 0, lastDetail: '' },
+  stats: emptyStats(),
 }
 
 let installed = false
@@ -106,7 +110,20 @@ export function resetPageState() {
   state.comments = null
   state.loading = null
   state.cid = undefined
-  state.stats = { requests: 0, armed: 0, reads: 0, segments: 0, injected: 0, lastDetail: '' }
+  state.stats = emptyStats()
+}
+
+function emptyStats(): HookStats {
+  return {
+    requests: 0,
+    armed: 0,
+    reads: 0,
+    xhrs: 0,
+    fetches: 0,
+    segments: 0,
+    injected: 0,
+    lastDetail: '',
+  }
 }
 
 function toNumber(value: string | null): number | undefined {
@@ -535,6 +552,9 @@ function defineShadowResponse(xhr: XHRWithContext, request: SegRequest) {
     })
   } catch (error) {
     // 极少数环境不允许覆盖，退化为不合并
+    state.stats.lastDetail = `无法覆盖 xhr.response：${
+      (error as Error)?.message || error
+    }`
     console.warn('[danmaku-enhance] 无法拦截弹幕响应', error)
   }
 }
@@ -585,6 +605,7 @@ function patchXHR(target?: any): boolean {
     }
 
     const xhr = this
+    state.stats.xhrs++
     // 先同步装好 getter：一旦进入异步等待，播放器可能 abort/复用这个 xhr，
     // 等回来时 readyState 已不是 1，就再也没机会合并了。
     defineShadowResponse(xhr, request)
@@ -612,6 +633,8 @@ function patchXHR(target?: any): boolean {
 function patchFetch(target: any) {
   const originalFetch = target.fetch
   if (typeof originalFetch !== 'function') return
+  // 跨 realm 时用页面自己的 Response，否则页面的 instanceof 判断会失败
+  const ResponseCtor: typeof Response = target.Response || Response
 
   target.fetch = function (
     this: Window,
@@ -636,13 +659,37 @@ function patchFetch(target: any) {
       return originalFetch.call(this, input, init)
     }
 
+    state.stats.fetches++
+
     const ctx = request
     return (async () => {
       await waitForLoading()
 
       const response = await originalFetch.call(this, input, init)
-      if (!state.enabled || !response.ok) return response
+      if (!state.enabled) {
+        state.stats.lastDetail = '响应返回时开关已关闭'
+        return response
+      }
 
+      // 304 = 该分段没有原生弹幕。播放器看到 304 会当作「无弹幕」，
+      // 但第三方弹幕仍要注入，所以合成为 200 空体 + 注入内容。
+      if (response.status === 304) {
+        state.stats.reads++
+        const merged = buildInjections(ctx, new Uint8Array(0))
+        if (!merged) return response
+        return new ResponseCtor(toArrayBuffer(merged), {
+          status: 200,
+          statusText: 'OK',
+          headers: { 'content-type': 'application/octet-stream' },
+        })
+      }
+
+      if (!response.ok) {
+        state.stats.lastDetail = `fetch 响应状态 ${response.status}`
+        return response
+      }
+
+      state.stats.reads++
       try {
         const bytes = new Uint8Array(await response.clone().arrayBuffer())
         const merged = buildInjections(ctx, bytes)
@@ -652,12 +699,14 @@ function patchFetch(target: any) {
         headers.delete('content-length')
         headers.delete('content-encoding')
 
-        return new Response(toArrayBuffer(merged), {
+        return new ResponseCtor(toArrayBuffer(merged), {
           status: response.status,
           statusText: response.statusText,
           headers,
         })
       } catch (error) {
+        const msg = (error as Error)?.message || String(error)
+        state.stats.lastDetail = `合并 fetch 弹幕异常：${msg}`
         console.warn('[danmaku-enhance] 合并 fetch 弹幕失败', error)
         return response
       }
