@@ -26,6 +26,8 @@
 // @include      https://play.girigirilove.top/*
 // @include      https://giri.moemoekyu.com/*
 // @include      https://www.tucao.my/*
+// @include      https://www.bilibili.com/*
+// @include      https://bilibili.com/*
 // @include      https://ironkinoko.github.io/agefans-enhance/*
 // @run-at       document-end
 // @require      https://unpkg.com/jquery@3.6.0/dist/jquery.min.js

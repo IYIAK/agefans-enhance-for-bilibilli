@@ -13,6 +13,7 @@
 - [girigiri 爱](https://anime.girigirilove.com/)
 - [吐槽弹幕网](https://www.tucao.my/)
 - [独立播放器](https://ironkinoko.github.io/agefans-enhance/)
+- [哔哩哔哩](https://www.bilibili.com)（不替换播放器，把弹弹play 的弹幕混入 B 站原生弹幕）
 
 **请使用 <kbd>?</kbd> 键查看脚本信息与快捷键**
 
@@ -32,6 +33,7 @@
 - 记录播放位置，自动续播
 - 可以按 <kbd>?</kbd> 键调出脚本信息窗口，查看**视频信息**与**快捷键**
 - 多站点适配，可搜索相同视频资源/种子
+- 哔哩哔哩：在原生播放器上把弹弹play 的弹幕混入 B 站弹幕（不替换播放器，需在播放器右上角的「第三方弹幕」面板里手动开启）
 
 ## 安装
 
