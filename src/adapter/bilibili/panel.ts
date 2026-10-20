@@ -323,6 +323,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       parts.push(`通道 xhr${stats.xhrs}/fetch${stats.fetches}`)
       parts.push(`接管 ${stats.reads}`)
       parts.push(`合并 ${stats.segments} 段/${stats.injected} 条`)
+      parts.push(`段 ${stats.lastSeg ?? '-'}／合至 ${stats.lastMergedSeg ?? '-'}`)
       let sub = parts.join(' · ')
       if (stats.lastDetail) sub += `｜${stats.lastDetail}`
       // 开关晚于请求打开时，播放器已经缓存了本段，必须重新请求才会经过拦截

@@ -47,6 +47,10 @@ interface HookStats {
   injected: number
   /** 最近一次合并被丢弃的原因，用于面板上直接显示 */
   lastDetail: string
+  /** 最近一次处理的分段序号（null 表示没有序号） */
+  lastSeg: number | null
+  /** 最近一次真正合并成功的分段序号 */
+  lastMergedSeg: number | null
   /** 最近一次分段请求的生命周期（readyState/status/是否被中止/是否读了 response） */
   lastState: string
   /** response getter 的安装结果，装不上时这里写原因 */
@@ -138,6 +142,8 @@ function emptyStats(): HookStats {
     segments: 0,
     injected: 0,
     lastDetail: '',
+    lastSeg: null,
+    lastMergedSeg: null,
     lastState: '',
     hook: '',
   }
@@ -352,6 +358,7 @@ function buildInjections(
   request: SegRequest,
   bytes: Uint8Array
 ): Uint8Array | null {
+  state.stats.lastSeg = request.index ?? null
   if (!state.enabled) return detail('开关未开启')
   // 请求的 cid 和当前页面不一致（比如预加载下一集）时不合并
   if (state.cid && request.oid && state.cid !== request.oid) {
@@ -411,6 +418,7 @@ function buildInjections(
   const merged = appendElems(bytes, elems)
   state.stats.segments++
   state.stats.injected += elems.length
+  state.stats.lastMergedSeg = request.index ?? null
   state.stats.lastDetail = `本段注入 ${elems.length} 条`
   return merged
 }
