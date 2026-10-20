@@ -163,15 +163,10 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   const urlTip = el('div', `${ROOT_CLASS}__tip`)
 
   // 弹弹play
-  const ddpTitle = el('div', `${ROOT_CLASS}__section ${ROOT_CLASS}__section--row`)
-  ddpTitle.append(el('span', undefined, '弹弹play 匹配'))
-  const rematchBtn = el('button', `${ROOT_CLASS}__icon-text`, '重新匹配')
-  rematchBtn.type = 'button'
-  rematchBtn.title = '忘掉当前选择，重新自动匹配'
-  const changeAnimeBtn = el('button', `${ROOT_CLASS}__icon-text`, '换番剧')
-  changeAnimeBtn.type = 'button'
-  changeAnimeBtn.title = '用下面的关键词重新搜索，再从候选里挑'
-  ddpTitle.append(rematchBtn, changeAnimeBtn)
+  // 这里原来有「重新匹配」「换番剧」两个按钮，语义和下面这排搜索完全重叠：
+  // 点候选就是重新匹配，输入框里打字再按搜索就是换番剧。按钮只会让人猜
+  // 它们和搜索的区别，所以去掉，只留搜索这一条路。
+  const ddpTitle = el('div', `${ROOT_CLASS}__section`, '弹弹play 匹配')
 
   const searchRow = el('div', `${ROOT_CLASS}__row ${ROOT_CLASS}__row--input`)
   const searchInput = el('input', `${ROOT_CLASS}__input`) as HTMLInputElement
@@ -904,16 +899,6 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   searchBtn.addEventListener('click', () => void doSearch())
   searchInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') void doSearch()
-  })
-
-  rematchBtn.addEventListener('click', () => {
-    candidateList = []
-    void ensureMatch()
-  })
-
-  changeAnimeBtn.addEventListener('click', () => {
-    // 用搜索框里的词重新搜一批候选，挑完会重走集数选择
-    void doSearch()
   })
 
   filterReload.addEventListener('click', () => reloadDanmaku())

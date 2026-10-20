@@ -127,6 +127,14 @@
     }
   }
 
+  // 面板 body 是纵向 flex，子项默认 flex-shrink:1。候选列表这类
+  // overflow-y:auto 的滚动容器，自动最小尺寸是 0，会被压成一条缝——
+  // 候选按钮全被裁掉，用户就以为「点了搜索没有结果可选」；输入框同理
+  // 会被压成一行。统一禁止收缩，放不下就让 body 自己滚。
+  &__body > * {
+    flex: 0 0 auto;
+  }
+
   &__row {
     display: flex;
     align-items: center;
