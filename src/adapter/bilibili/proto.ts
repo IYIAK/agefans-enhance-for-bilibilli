@@ -41,6 +41,8 @@ export interface NativeElem {
   /** 出现时间（毫秒） */
   timeMs: number
   mode: number
+  /** RGB888 */
+  color: number
   text: string
   dmid: string
 }
@@ -94,6 +96,7 @@ function decodeElem(buf: Uint8Array): NativeElem {
   let pos = 0
   let timeMs = 0
   let mode = 1
+  let color = 0xffffff
   let text = ''
   let dmid = ''
 
@@ -124,6 +127,7 @@ function decodeElem(buf: Uint8Array): NativeElem {
       pos = val.next
       if (field === 2) timeMs = val.value
       else if (field === 3) mode = val.value
+      else if (field === 5) color = val.value
       continue
     }
 
@@ -132,7 +136,7 @@ function decodeElem(buf: Uint8Array): NativeElem {
     pos = next
   }
 
-  return { timeMs, mode, text, dmid }
+  return { timeMs, mode, color, text, dmid }
 }
 
 /** 解码一个分段响应里的原生弹幕（只取合并需要的字段） */

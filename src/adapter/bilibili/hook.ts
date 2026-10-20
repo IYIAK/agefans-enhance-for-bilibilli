@@ -1,11 +1,12 @@
 import type { Comment } from '../../player/plugins/danmaku/types'
 import { appendElems, decodeElems } from './proto'
 import type { InjectElem, NativeElem } from './proto'
+import { collectItems } from './sources/state'
 
 /**
  * B 站播放器通过 XHR 请求 /x/v2/dm/(wbi/)web/seg.so 获取弹幕分段，
  * 响应是 DmSegMobileReply 的 protobuf 字节。这里在网络层拦截响应，
- * 把弹弹play 的弹幕追加成 protobuf 记录后再交给播放器，
+ * 把第三方弹幕追加成 protobuf 记录后再交给播放器，
  * 这样 B 站的弹幕渲染、过滤、设置都保持原样。
  */
 
@@ -16,6 +17,10 @@ const SEGMENT_MS = 6 * 60 * 1000
 const MAX_PER_SEGMENT = 3000
 /** 等待弹幕匹配完成的最长时间（毫秒） */
 const LOAD_WAIT_MS = 4000
+/** 与原生弹幕去重的时间窗口（毫秒） */
+const NATIVE_DEDUPE_MS = 1500
+/** 第三方来源之间的去重窗口（巴哈姆特时间只精确到秒，放宽一点） */
+const INJECT_DEDUPE_MS = 1800
 
 interface SegRequest {
   oid?: number
@@ -32,6 +37,7 @@ interface HookState {
   enabled: boolean
   dedupe: boolean
   cid?: number
+  /** 弹弹play 的弹幕 */
   comments: Comment[] | null
   loading: Promise<void> | null
   stats: HookStats
@@ -69,12 +75,12 @@ export function setCid(cid?: number) {
   state.cid = cid
 }
 
-export function getComments() {
-  return state.comments
-}
-
 export function setComments(comments: Comment[] | null) {
   state.comments = comments
+}
+
+export function getComments() {
+  return state.comments
 }
 
 export function setLoading(loading: Promise<void> | null) {
@@ -151,7 +157,7 @@ function hasNear(
   return false
 }
 
-function toBiliMode(mode?: string) {
+function toBiliMode(mode?: string): 1 | 4 | 5 {
   if (mode === 'top') return 5
   if (mode === 'bottom') return 4
   return 1
@@ -185,8 +191,25 @@ function makeDmid(text: string, timeMs: number) {
   return String(1000000000000000 + (Math.abs(hash) % 900000000000000))
 }
 
+/** 统一成内部的候选弹幕形态 */
+interface Candidate {
+  timeMs: number
+  mode: 1 | 4 | 5
+  color: number
+  text: string
+}
+
+function candidatesFromComments(comments: Comment[]): Candidate[] {
+  return comments.map((comment) => ({
+    timeMs: Math.round((comment.time || 0) * 1000),
+    mode: toBiliMode(comment.mode),
+    color: parseColor((comment.style as any)?.color),
+    text: String(comment.text || '').trim(),
+  }))
+}
+
 function pickComments(
-  comments: Comment[],
+  candidates: Candidate[],
   request: SegRequest,
   nativeElems: NativeElem[]
 ): InjectElem[] {
@@ -198,27 +221,25 @@ function pickComments(
   const injectedTimes = new Map<string, number[]>()
   const picked: InjectElem[] = []
 
-  for (const comment of comments) {
+  for (const item of candidates) {
     if (picked.length >= MAX_PER_SEGMENT) break
 
-    const timeMs = Math.round((comment.time || 0) * 1000)
+    const { timeMs } = item
     if (timeMs < request.startMs || timeMs >= request.endMs) continue
 
-    const text = String(comment.text || '').trim()
+    const text = item.text
     if (!text) continue
 
     const key = normalizeText(text)
     if (state.dedupe) {
-      // 与 B 站原生弹幕去重（时间放宽 1.5s）
-      if (hasNear(nativeTimes, key, timeMs, 1500)) continue
-      // 弹弹play 聚合了多个源，自身也可能重复
-      if (hasNear(injectedTimes, key, timeMs, 400)) continue
+      if (hasNear(nativeTimes, key, timeMs, NATIVE_DEDUPE_MS)) continue
+      if (hasNear(injectedTimes, key, timeMs, INJECT_DEDUPE_MS)) continue
     }
 
     picked.push({
       timeMs,
-      mode: toBiliMode(comment.mode),
-      color: parseColor((comment.style as any)?.color),
+      mode: item.mode,
+      color: item.color,
       text,
       dmid: makeDmid(text, timeMs),
       oid: request.oid,
@@ -233,13 +254,19 @@ function buildInjections(
   request: SegRequest,
   bytes: Uint8Array
 ): Uint8Array | null {
-  const comments = state.comments
-  if (!state.enabled || !comments?.length) return null
+  if (!state.enabled) return null
   // 请求的 cid 和当前页面不一致（比如预加载下一集）时不合并
   if (state.cid && request.oid && state.cid !== request.oid) return null
 
+  // 弹弹play 和 URL 来源可以同时生效
+  const candidates = [
+    ...(state.comments ? candidatesFromComments(state.comments) : []),
+    ...collectItems(),
+  ]
+  if (!candidates.length) return null
+
   const nativeElems = state.dedupe ? decodeElems(bytes) : []
-  const elems = pickComments(comments, request, nativeElems)
+  const elems = pickComments(candidates, request, nativeElems)
   if (!elems.length) return null
 
   const merged = appendElems(bytes, elems)
@@ -291,14 +318,14 @@ function defineShadowResponse(xhr: XHRWithContext, request: SegRequest) {
           const merged = buildInjections(request, new Uint8Array(raw))
           if (merged) result = toArrayBuffer(merged)
         } catch (error) {
-          console.warn('[bilibili-danmaku] 合并弹幕失败', error)
+          console.warn('[danmaku-enhance] 合并弹幕失败', error)
         }
         return result ?? raw
       },
     })
   } catch (error) {
     // 极少数环境不允许覆盖，退化为不合并
-    console.warn('[bilibili-danmaku] 无法拦截弹幕响应', error)
+    console.warn('[danmaku-enhance] 无法拦截弹幕响应', error)
   }
 }
 
@@ -353,7 +380,7 @@ function patchXHR() {
       try {
         originalSend.call(xhr, body as any)
       } catch (error) {
-        console.warn('[bilibili-danmaku] 发送弹幕请求失败', error)
+        console.warn('[danmaku-enhance] 发送弹幕请求失败', error)
       }
     })()
   }
@@ -407,7 +434,7 @@ function patchFetch() {
           headers,
         })
       } catch (error) {
-        console.warn('[bilibili-danmaku] 合并 fetch 弹幕失败', error)
+        console.warn('[danmaku-enhance] 合并 fetch 弹幕失败', error)
         return response
       }
     })()

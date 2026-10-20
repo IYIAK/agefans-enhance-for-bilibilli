@@ -2,7 +2,8 @@ import './index.scss'
 import { runtime } from '../../runtime'
 import { installHook, resetPageState, setCid, setDedupe, setEnabled } from './hook'
 import { isLivePage, readPageInfo } from './info'
-import { loadConfig, mountPanel } from './panel'
+import { mountPanel } from './panel'
+import { loadConfig } from './store'
 
 /** 视频、番剧、影视、播放列表、合集等有播放器的页面 */
 const PATH_TEST =

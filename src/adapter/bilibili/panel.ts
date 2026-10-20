@@ -1,331 +1,659 @@
-import { sleep } from '../../utils/sleep'
-import { gm } from '../../utils/storage'
-import { getStats, setCid, setComments, setDedupe, setEnabled, setLoading } from './hook'
+/**
+ * B 站播放器的弹幕增强面板。
+ *
+ * 入口是控制条右侧的一个图标按钮，点开才显示面板（点面板外面自动收起），
+ * 找不到控制条时退化成一个右下角的小胶囊。
+ */
 import type { BiliPageInfo } from './info'
+import { getStats, setComments, setDedupe, setEnabled, setLoading } from './hook'
 import {
   MatchError,
+  chooseEpisode,
+  cleanTitle,
   commentsOf,
   episodeList,
+  findAnime,
+  manualSearch,
   rememberMatch,
-  resolveComments,
+  rememberedAnime,
+  squash,
 } from './match'
 import type { AnimeItem, EpisodeItem } from './match'
+import { loadConfig, saveConfig } from './store'
+import type { BiliConfig } from './store'
+import {
+  addSource,
+  getEntries,
+  removeSource,
+  resetUrlSources,
+  restoreSources,
+  setOffset,
+  subscribe,
+} from './sources/state'
+import type { UrlSourceEntry } from './sources/state'
 
-export interface BiliConfig {
-  enabled: boolean
-  dedupe: boolean
-}
+const ROOT_CLASS = 'k-bili-dm'
 
-export interface BiliPanel {
-  dispose(): void
-  load(): void
-}
+/** 控制条右侧的按钮容器（不同版本结构不一样，挨个试） */
+const CONTROL_BAR_SELECTORS = [
+  '.bpx-player-control-bottom-right',
+  '.bilibili-player-video-btn-widescreen',
+  '.bpx-player-ctrl-btn[aria-label]',
+  '.bilibili-player-video-btn',
+]
 
-const CONFIG_KEY = 'bilibili-danmaku-config'
-
-const ANCHOR_SELECTORS = [
+/** 播放器根节点，用来给面板定位 */
+const PLAYER_SELECTORS = [
   '#bilibili-player',
   '.bpx-player-container',
   '#playerWrap',
   '#player',
 ]
 
-export function loadConfig(): BiliConfig {
-  return gm.getItem<BiliConfig>(CONFIG_KEY, { enabled: false, dedupe: true })
+const ANCHOR_RETRY = 12
+const ANCHOR_RETRY_MS = 500
+
+export interface PanelHandle {
+  dispose(): void
 }
 
-export function saveConfig(config: Partial<BiliConfig>) {
-  gm.setItem(CONFIG_KEY, { ...loadConfig(), ...config })
+function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  className?: string,
+  text?: string
+): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag)
+  if (className) node.className = className
+  if (text !== undefined) node.textContent = text
+  return node
 }
 
-async function findAnchor(): Promise<JQuery | undefined> {
-  const deadline = Date.now() + 15000
-
-  while (Date.now() < deadline) {
-    for (const selector of ANCHOR_SELECTORS) {
-      const el = document.querySelector(selector)
-      if (el) return $(el as HTMLElement)
-    }
-    await sleep(300)
+function findOne<T extends Element = HTMLElement>(selectors: string[]) {
+  for (const selector of selectors) {
+    const node = document.querySelector(selector)
+    if (node) return node as T
   }
-
-  return undefined
+  return null
 }
 
-function createPanelDom(config: BiliConfig) {
-  return $(`
-<div class="k-bili-danmaku">
-  <div class="k-bili-danmaku__head">
-    <span class="k-bili-danmaku__title">第三方弹幕</span>
-    <label class="k-bili-danmaku__switch" title="开启后把弹弹play 的弹幕混入 B 站原生弹幕">
-      <input type="checkbox" class="k-bili-danmaku__enable" ${config.enabled ? 'checked' : ''}>
-      <span class="k-bili-danmaku__slider"></span>
-    </label>
-  </div>
-  <div class="k-bili-danmaku__body">
-    <div class="k-bili-danmaku__status"></div>
-    <div class="k-bili-danmaku__field">
-      <span class="k-bili-danmaku__label">番剧</span>
-      <select class="k-bili-danmaku__anime" disabled></select>
-    </div>
-    <div class="k-bili-danmaku__field">
-      <span class="k-bili-danmaku__label">集数</span>
-      <select class="k-bili-danmaku__episode" disabled></select>
-    </div>
-    <div class="k-bili-danmaku__actions">
-      <button type="button" class="k-bili-danmaku__retry">重新匹配</button>
-      <button type="button" class="k-bili-danmaku__reload">刷新页面</button>
-    </div>
-    <label class="k-bili-danmaku__dedupe">
-      <input type="checkbox" class="k-bili-danmaku__dedupe-input" ${config.dedupe ? 'checked' : ''}>
-      与 B 站弹幕去重
-    </label>
-    <div class="k-bili-danmaku__stats"></div>
-    <div class="k-bili-danmaku__tip">
-      开关只对之后加载的弹幕分段生效；切换分P/集数或刷新页面后完整生效。
-    </div>
-  </div>
-</div>`)
+function formatOffset(offsetMs: number) {
+  const value = Math.round(offsetMs / 100) / 10
+  return String(value)
 }
 
-export function mountPanel(info: BiliPageInfo): BiliPanel {
-  const config = loadConfig()
-  setEnabled(config.enabled)
-  setDedupe(config.dedupe)
-  setCid(info.cid)
+export function mountPanel(info: BiliPageInfo): PanelHandle {
+  const config: BiliConfig = loadConfig()
 
-  let disposed = false
-  let $panel: JQuery | undefined
-  let pendingStatus = ''
-  let animes: AnimeItem[] = []
-  let episodes: EpisodeItem[] = []
-  let animeId: string | undefined
-  let episodeId: number | undefined
-  let loadToken = 0
-  let statsTimer: number | undefined
+  // ── 控制条按钮 ───────────────────────────────────────────
+  const button = el('div', `${ROOT_CLASS}__btn`)
+  button.title = '第三方弹幕'
+  button.innerHTML =
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-7l-4.6 3.5A1 1 0 0 1 7 19.6V17H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm2 4v2h2V8H6Zm4 0v2h8V8h-8Zm-4 4v2h8v-2H6Zm10 0v2h2v-2h-2Z"/></svg>'
 
-  function setStatus(text: string) {
-    pendingStatus = text
-    $panel?.find('.k-bili-danmaku__status').text(text)
-  }
+  // ── 面板骨架 ────────────────────────────────────────────
+  const panel = el('div', `${ROOT_CLASS}__panel`)
+  panel.hidden = true
 
-  function currentAnime(): AnimeItem | undefined {
-    return animes.find((o) => String(o.id) === String(animeId))
-  }
+  const header = el('div', `${ROOT_CLASS}__header`)
+  const titleText = el('span', `${ROOT_CLASS}__title`, '第三方弹幕')
+  const closeBtn = el('button', `${ROOT_CLASS}__close`, '×')
+  closeBtn.title = '收起'
+  header.append(titleText, closeBtn)
 
-  function currentEpisode(): EpisodeItem | undefined {
-    return episodes.find((o) => o.id === episodeId)
-  }
+  const switchRow = el('label', `${ROOT_CLASS}__row`)
+  const switchLabel = el('span', `${ROOT_CLASS}__label`, '启用注入')
+  const switchBox = el('span', `${ROOT_CLASS}__switch`)
+  const switchInput = el('input') as HTMLInputElement
+  switchInput.type = 'checkbox'
+  switchInput.checked = config.enabled
+  switchBox.append(switchInput, el('span', `${ROOT_CLASS}__slider`))
+  switchRow.append(switchLabel, switchBox)
 
-  function renderSelects() {
-    if (!$panel) return
+  const dedupeRow = el('label', `${ROOT_CLASS}__row`)
+  const dedupeLabel = el('span', `${ROOT_CLASS}__label`, '与原生去重')
+  const dedupeBox = el('span', `${ROOT_CLASS}__switch`)
+  const dedupeInput = el('input') as HTMLInputElement
+  dedupeInput.type = 'checkbox'
+  dedupeInput.checked = config.dedupe
+  dedupeBox.append(dedupeInput, el('span', `${ROOT_CLASS}__slider`))
+  dedupeRow.append(dedupeLabel, dedupeBox)
 
-    const $anime = $panel.find('.k-bili-danmaku__anime')
-    $anime.empty()
-    if (animes.length) {
-      animes.forEach((anime) => {
-        $anime.append($('<option>').val(anime.id).text(anime.name))
-      })
-      $anime.val(String(animeId ?? animes[0].id)).prop('disabled', false)
-    } else {
-      $anime.append($('<option>').val('').text('（未匹配到番剧）'))
-      $anime.prop('disabled', true)
-    }
+  const status = el('div', `${ROOT_CLASS}__status`)
+  const statusMain = el('div', `${ROOT_CLASS}__status-main`)
+  const statusSub = el('div', `${ROOT_CLASS}__status-sub`)
+  status.append(statusMain, statusSub)
 
-    const $episode = $panel.find('.k-bili-danmaku__episode')
-    $episode.empty()
-    if (episodes.length) {
-      episodes.forEach((episode) => {
-        $episode.append($('<option>').val(String(episode.id)).text(episode.name))
-      })
-      $episode
-        .val(String(episodeId ?? episodes[0].id))
-        .prop('disabled', false)
-    } else {
-      $episode.append($('<option>').val('').text('（无集数）'))
-      $episode.prop('disabled', true)
-    }
-  }
+  // URL 源
+  const urlTitle = el('div', `${ROOT_CLASS}__section`, 'URL 弹幕源')
+  const urlInputRow = el('div', `${ROOT_CLASS}__row ${ROOT_CLASS}__row--input`)
+  const urlInput = el('input', `${ROOT_CLASS}__input`) as HTMLInputElement
+  urlInput.type = 'text'
+  urlInput.placeholder = '粘贴 B站 / 巴哈姆特 视频链接'
+  const urlAddBtn = el('button', `${ROOT_CLASS}__mini`, '添加')
+  urlInputRow.append(urlInput, urlAddBtn)
 
-  function renderStats() {
-    if (!$panel) return
-    const stats = getStats()
-    $panel
-      .find('.k-bili-danmaku__stats')
-      .text(
-        stats.injected
-          ? `本次页面已混入 ${stats.injected} 条（${stats.segments} 个分段）`
-          : ''
-      )
-  }
+  const urlList = el('div', `${ROOT_CLASS}__list`)
+  const urlTip = el('div', `${ROOT_CLASS}__tip`)
 
-  async function load() {
-    if (!config.enabled) {
-      setStatus('未开启')
+  // 弹弹play
+  const ddpTitle = el('div', `${ROOT_CLASS}__section`, '弹弹play 匹配')
+  const searchRow = el('div', `${ROOT_CLASS}__row ${ROOT_CLASS}__row--input`)
+  const searchInput = el('input', `${ROOT_CLASS}__input`) as HTMLInputElement
+  searchInput.type = 'text'
+  searchInput.placeholder = '番剧名（子串匹配）'
+  searchInput.value = cleanTitle(info.seriesName)
+  const searchBtn = el('button', `${ROOT_CLASS}__mini`, '搜索')
+  searchRow.append(searchInput, searchBtn)
+
+  const candidates = el('div', `${ROOT_CLASS}__list`)
+  const episodeSelect = el('select', `${ROOT_CLASS}__select`) as HTMLSelectElement
+  const matchTip = el('div', `${ROOT_CLASS}__tip`)
+
+  const body = el('div', `${ROOT_CLASS}__body`)
+  body.append(
+    switchRow,
+    dedupeRow,
+    status,
+    urlTitle,
+    urlInputRow,
+    urlList,
+    urlTip,
+    ddpTitle,
+    searchRow,
+    candidates,
+    episodeSelect,
+    matchTip
+  )
+  panel.append(header, body)
+
+  // ── 挂载 ────────────────────────────────────────────────
+  document.body.append(panel)
+  panel.classList.add('is-floating')
+
+  let anchorRetry = 0
+  let anchorTimer: number | undefined
+  let detached = false
+
+  function placeButton() {
+    if (detached) return
+    const anchor = findOne(CONTROL_BAR_SELECTORS)
+    if (anchor) {
+      anchor.append(button)
       return
     }
+    if (anchorRetry++ >= ANCHOR_RETRY) {
+      button.classList.add('is-floating')
+      document.body.append(button)
+      return
+    }
+    anchorTimer = window.setTimeout(placeButton, ANCHOR_RETRY_MS)
+  }
+  placeButton()
 
-    const token = ++loadToken
-    setStatus('正在匹配弹弹play 弹幕…')
+  // ── 面板开关与定位 ──────────────────────────────────────
+  let opened = false
+
+  function placePanel() {
+    const player = findOne(PLAYER_SELECTORS)
+    if (!player) {
+      panel.style.left = 'auto'
+      panel.style.right = '16px'
+      panel.style.bottom = '96px'
+      return
+    }
+    const rect = player.getBoundingClientRect()
+    const width = Math.min(340, Math.max(264, rect.width * 0.34))
+    panel.style.width = `${width}px`
+    panel.style.left = `${Math.max(8, rect.right - width - 12)}px`
+    panel.style.right = 'auto'
+    panel.style.bottom = `${Math.max(8, window.innerHeight - rect.bottom + 52)}px`
+  }
+
+  function open(next: boolean) {
+    opened = next
+    panel.hidden = !next
+    button.classList.toggle('is-active', next)
+    if (next) {
+      placePanel()
+      render()
+    }
+  }
+
+  function onDocumentClick() {
+    if (opened) open(false)
+  }
+
+  function onResize() {
+    if (opened) placePanel()
+  }
+
+  button.addEventListener('click', (e) => {
+    e.stopPropagation()
+    open(!opened)
+  })
+  closeBtn.addEventListener('click', () => open(false))
+  panel.addEventListener('click', (e) => e.stopPropagation())
+  document.addEventListener('click', onDocumentClick)
+  window.addEventListener('resize', onResize)
+
+  // ── 开关 ────────────────────────────────────────────────
+  switchInput.addEventListener('change', () => {
+    config.enabled = switchInput.checked
+    saveConfig(config)
+    setEnabled(config.enabled)
+    render()
+    if (config.enabled) void ensureMatch()
+    else {
+      setComments(null)
+      setLoading(null)
+    }
+  })
+
+  dedupeInput.addEventListener('change', () => {
+    config.dedupe = dedupeInput.checked
+    saveConfig(config)
+    setDedupe(config.dedupe)
+    render()
+  })
+
+  // ── 匹配状态 ────────────────────────────────────────────
+  let anime: AnimeItem | undefined
+  let episode: EpisodeItem | undefined
+  let candidateList: AnimeItem[] = []
+  let episodeOptions: EpisodeItem[] = []
+  let tried: string[] = []
+  let notice = ''
+  let busy = false
+
+  function resetMatch(nextNotice = '') {
+    anime = undefined
+    episode = undefined
+    candidateList = []
+    episodeOptions = []
+    tried = []
+    notice = nextNotice
+    setComments(null)
+  }
+
+  function render() {
+    renderStatus()
+    renderCandidates()
+    renderEpisodes()
+    renderUrls()
+
+    urlTip.classList.remove('is-error')
+    urlTip.textContent = config.enabled
+      ? 'URL 来源和弹弹play 可以同时生效；时间对不上时填偏移（秒）'
+      : '先打开上面的开关'
+  }
+
+  function renderStatus() {
+    const stats = getStats()
+
+    if (!config.enabled) {
+      statusMain.textContent = '未开启'
+      statusSub.textContent = '打开开关后才会向播放器注入弹幕'
+      return
+    }
+    if (busy && notice) {
+      statusMain.textContent = notice
+      statusSub.textContent = ''
+      return
+    }
+    if (notice) {
+      statusMain.textContent = notice
+      statusSub.textContent = tried.length ? `试过：${tried.join(' / ')}` : ''
+      return
+    }
+    if (anime && episode) {
+      statusMain.textContent = `${anime.name} · ${episode.name}`
+      statusSub.textContent = stats.injected
+        ? `弹弹play 已合并 ${stats.segments} 段 / ${stats.injected} 条`
+        : '等播放器请求弹幕…'
+      return
+    }
+    if (anime) {
+      statusMain.textContent = anime.name
+      statusSub.textContent = '请选择集数'
+      return
+    }
+    statusMain.textContent = '等待匹配'
+    statusSub.textContent = ''
+  }
+
+  function renderCandidates() {
+    candidates.textContent = ''
+    if (anime || !candidateList.length) {
+      candidates.hidden = true
+      return
+    }
+    candidates.hidden = false
+    candidates.append(
+      el('div', `${ROOT_CLASS}__tip`, '找到多部可能匹配的番剧，请选择：')
+    )
+    for (const item of candidateList) {
+      const row = el('button', `${ROOT_CLASS}__item`, item.name)
+      row.title = item.name
+      row.addEventListener('click', () => void pickAnime(item))
+      candidates.append(row)
+    }
+  }
+
+  function renderEpisodes() {
+    episodeSelect.textContent = ''
+    if (anime && !episode && episodeOptions.length) {
+      episodeSelect.hidden = false
+      const placeholder = el('option') as HTMLOptionElement
+      placeholder.value = ''
+      placeholder.textContent = '选择集数…'
+      episodeSelect.append(placeholder)
+      for (const ep of episodeOptions) {
+        const opt = el('option') as HTMLOptionElement
+        opt.value = String(ep.id)
+        opt.textContent = ep.name
+        episodeSelect.append(opt)
+      }
+      return
+    }
+    episodeSelect.hidden = true
+  }
+
+  episodeSelect.addEventListener('change', () => {
+    const id = episodeSelect.value
+    if (!id) return
+    const ep = episodeOptions.find((o) => String(o.id) === id)
+    if (ep) void pickEpisode(ep)
+  })
+
+  function renderUrls() {
+    const entries = getEntries()
+    urlList.textContent = ''
+    if (!entries.length) {
+      urlList.append(el('div', `${ROOT_CLASS}__tip`, '还没有 URL 来源（最多 3 条）'))
+      return
+    }
+    for (const entry of entries) urlList.append(renderUrlEntry(entry))
+  }
+
+  function renderUrlEntry(entry: UrlSourceEntry) {
+    const box = el('div', `${ROOT_CLASS}__url`)
+
+    const head = el('div', `${ROOT_CLASS}__url-head`)
+    const name = el(
+      'span',
+      `${ROOT_CLASS}__url-name`,
+      `${entry.sourceLabel} · ${entry.seriesTitle || '未命名'}`
+    )
+    name.title = `${entry.url}\n${entry.seriesTitle}`
+    const remove = el('button', `${ROOT_CLASS}__icon`, '×')
+    remove.title = '移除这条来源'
+    remove.addEventListener('click', (e) => {
+      e.stopPropagation()
+      removeSource(entry.key)
+    })
+    head.append(name, remove)
+
+    const epLine = el('div', `${ROOT_CLASS}__url-ep`)
+    epLine.textContent =
+      entry.episode.title + (entry.items.length ? ` · ${entry.items.length} 条` : '')
+
+    const offsetRow = el('div', `${ROOT_CLASS}__url-offset`)
+    offsetRow.append(el('span', undefined, '偏移'))
+    const offsetInput = el('input', `${ROOT_CLASS}__offset`) as HTMLInputElement
+    offsetInput.type = 'number'
+    offsetInput.step = '0.5'
+    offsetInput.value = formatOffset(entry.offsetMs)
+    offsetInput.addEventListener('change', () => {
+      const sec = Number(offsetInput.value)
+      setOffset(entry.key, Number.isFinite(sec) ? sec : 0)
+    })
+    offsetRow.append(offsetInput, el('span', undefined, '秒'))
+
+    const progress = el(
+      'div',
+      `${ROOT_CLASS}__url-progress`,
+      entry.error
+        ? `失败：${entry.error}`
+        : entry.progress || (entry.loading ? '拉取中…' : '')
+    )
+    if (entry.error) progress.classList.add('is-error')
+
+    box.append(head, epLine, offsetRow, progress)
+    return box
+  }
+
+  // ── 匹配动作 ────────────────────────────────────────────
+  async function ensureMatch() {
+    if (!config.enabled) return
+    busy = true
+    resetMatch('匹配中…')
+    render()
 
     const task = (async () => {
       try {
-        const result = await resolveComments(info, { animeId, episodeId })
-        animes = result.animes
-        episodes = result.episodes
-        animeId = result.animeId
-        episodeId = result.episodeId
-        setCid(info.cid)
-        setComments(result.comments)
-        renderSelects()
-        setStatus(
-          `已注入「${result.animeName}」${result.episodeName}，共 ${result.comments.length} 条弹幕`
-        )
-      } catch (error) {
-        setComments(null)
-        if (error instanceof MatchError) {
-          animes = error.animes
-          episodes = error.episodes || []
-          animeId = error.animeId ?? animeId
-          episodeId = undefined
-          renderSelects()
-          setStatus(error.message)
-        } else {
-          setStatus(`匹配失败：${(error as Error)?.message || error}`)
+        const keyword = cleanTitle(info.seriesName)
+        if (!keyword) throw new MatchError('没识别到当前视频的标题')
+
+        // 走 6 候选关键词流程：命中即停，比整串搜索更容易命中
+        const found = await findAnime(keyword, (msg) => {
+          notice = msg
+          if (opened) renderStatus()
+        })
+        tried = found.tried
+
+        // 优先用记住的映射与精确同名，其次单条候选
+        const picked = autoPick(found.animes)
+        if (picked) {
+          await pickAnime(picked, { silent: true })
+          return
         }
+        candidateList = found.animes.slice(0, 8)
+        notice = '请选择番剧'
+        busy = false
+        render()
+      } catch (error) {
+        busy = false
+        notice =
+          error instanceof MatchError
+            ? error.message
+            : `匹配失败：${(error as Error)?.message || error}`
+        if (error instanceof MatchError) {
+          tried = error.context.tried
+          candidateList = error.context.animes.slice(0, 8)
+          matchTip.textContent =
+            '弹弹play 搜索是纯子串匹配、最多 25 条且不翻页。可以直接用下面的搜索框改词重试。'
+        }
+        render()
       }
     })()
 
-    setLoading(
-      task.then(
-        () => undefined,
-        () => undefined
-      )
-    )
-    await task
-    if (token === loadToken) setLoading(null)
-  }
-
-  async function fetchCommentsForEpisode(id: number) {
-    setStatus('正在获取弹幕…')
-    const task = commentsOf(id).then(
-      (comments) => {
-        setComments(comments)
-        const anime = currentAnime()
-        const episode = currentEpisode()
-        if (anime && episode) rememberMatch(info, anime, episode)
-        setStatus(
-          `已注入「${anime?.name ?? ''}」${episode?.name ?? ''}，共 ${
-            comments.length
-          } 条弹幕`
-        )
-      },
-      (error) => {
-        setComments(null)
-        setStatus(`获取弹幕失败：${(error as Error)?.message || error}`)
-      }
-    )
     setLoading(task.then(() => undefined, () => undefined))
     await task
     setLoading(null)
   }
 
-  function bindEvents($panelDom: JQuery) {
-    $panelDom.on('click', '.k-bili-danmaku__head', (e) => {
-      if ($(e.target).closest('.k-bili-danmaku__switch').length) return
-      $panelDom.toggleClass('is-collapsed')
-    })
+  function autoPick(list: AnimeItem[]) {
+    if (!list.length) return undefined
 
-    $panelDom.on('change', '.k-bili-danmaku__enable', (e) => {
-      config.enabled = (e.target as HTMLInputElement).checked
-      saveConfig({ enabled: config.enabled })
-      setEnabled(config.enabled)
+    // 记住的映射优先
+    const remembered = rememberedAnime(list, info.seriesName)
+    if (remembered) return remembered
 
-      if (config.enabled) {
-        void load()
-      } else {
-        setComments(null)
-        setStatus('已关闭（已加载分段里的弹幕会保留到本集结束）')
-      }
-    })
+    const target = squash(info.seriesName).toLowerCase()
+    const exact = list.find((o) => squash(o.name).toLowerCase() === target)
+    if (exact) return exact
 
-    $panelDom.on('change', '.k-bili-danmaku__dedupe-input', (e) => {
-      config.dedupe = (e.target as HTMLInputElement).checked
-      saveConfig({ dedupe: config.dedupe })
-      setDedupe(config.dedupe)
-    })
-
-    $panelDom.on('click', '.k-bili-danmaku__retry', () => {
-      void load()
-    })
-
-    $panelDom.on('click', '.k-bili-danmaku__reload', () => {
-      location.reload()
-    })
-
-    $panelDom.on('change', '.k-bili-danmaku__anime', async (e) => {
-      animeId = String($(e.target).val() || '')
-      episodeId = undefined
-      const anime = currentAnime()
-      setStatus(`正在读取「${anime?.name || ''}」的集数…`)
-
-      try {
-        episodes = await episodeList(animeId)
-        renderSelects()
-        setStatus(`共 ${episodes.length} 集，请选择集数`)
-      } catch (error) {
-        episodes = []
-        renderSelects()
-        setStatus(`读取集数失败：${(error as Error)?.message || error}`)
-      }
-    })
-
-    $panelDom.on('change', '.k-bili-danmaku__episode', (e) => {
-      const id = Number($(e.target).val())
-      if (!id) return
-      episodeId = id
-      void fetchCommentsForEpisode(id)
-    })
+    // 只有一条候选时就是它
+    if (list.length === 1) return list[0]
+    return undefined
   }
 
-  async function mountDom() {
-    const anchor = await findAnchor()
-    if (disposed) return
+  async function pickAnime(item: AnimeItem, opts: { silent?: boolean } = {}) {
+    busy = true
+    notice = '读取集数…'
+    anime = item
+    candidateList = []
+    episode = undefined
+    render()
 
-    $panel = createPanelDom(config)
-    if (anchor && anchor.length) {
-      anchor.append($panel)
-      if (getComputedStyle(anchor[0]).position === 'static') {
-        anchor.css('position', 'relative')
+    try {
+      const list = await episodeList(item.id)
+      if (!list.length) {
+        busy = false
+        notice = `「${item.name}」没有可用集数`
+        anime = undefined
+        render()
+        return
       }
-    } else {
-      $panel.addClass('is-fixed')
-      $(document.body).append($panel)
+      episodeOptions = list
+      const guess = chooseEpisode(list, info)
+      if (guess) {
+        await pickEpisode(guess, opts)
+        return
+      }
+      busy = false
+      notice = ''
+      render()
+    } catch (error) {
+      busy = false
+      notice = `读取集数失败：${(error as Error)?.message || error}`
+      anime = undefined
+      render()
     }
-
-    bindEvents($panel)
-    renderSelects()
-    setStatus(pendingStatus || (config.enabled ? '已开启' : '未开启'))
-    renderStats()
-
-    statsTimer = window.setInterval(renderStats, 1000)
   }
 
-  void mountDom()
+  async function pickEpisode(ep: EpisodeItem, opts: { silent?: boolean } = {}) {
+    const current = anime
+    if (!current) return
+    busy = true
+    notice = `加载「${ep.name}」弹幕…`
+    render()
 
-  // 立即开始匹配，让播发器最早的分段请求也能等到弹幕
-  if (config.enabled) void load()
+    try {
+      const comments = await commentsOf(ep.id)
+      if (!comments.length) {
+        busy = false
+        notice = `「${current.name}」${ep.name} 没有弹幕`
+        render()
+        return
+      }
+      episode = ep
+      episodeOptions = []
+      notice = ''
+      busy = false
+      setComments(comments)
+      rememberMatch(info, current, ep)
+      render()
+    } catch (error) {
+      busy = false
+      notice = `加载弹幕失败：${(error as Error)?.message || error}`
+      render()
+    }
+  }
+
+  async function doSearch() {
+    const keyword = searchInput.value.trim()
+    if (keyword.length < 2) {
+      notice = '至少输入 2 个字'
+      render()
+      return
+    }
+    busy = true
+    notice = '搜索中…'
+    candidateList = []
+    anime = undefined
+    episode = undefined
+    episodeOptions = []
+    setComments(null)
+    render()
+
+    try {
+      const found = await manualSearch(keyword)
+      busy = false
+      if (!found.length) {
+        notice = '没有结果'
+        matchTip.textContent =
+          '弹弹play 最多只回 25 条、按 id 升序且不翻页，短词可能搜不到，试试更长的子串。'
+        render()
+        return
+      }
+      tried = [keyword]
+      notice = ''
+      candidateList = found.slice(0, 8)
+      matchTip.textContent = `「${keyword}」共 ${found.length} 条`
+      render()
+    } catch (error) {
+      busy = false
+      notice = `搜索失败：${(error as Error)?.message || error}`
+      render()
+    }
+  }
+
+  searchBtn.addEventListener('click', () => void doSearch())
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') void doSearch()
+  })
+
+  // ── URL 来源 ────────────────────────────────────────────
+  let adding = false
+
+  async function onAddUrl() {
+    const url = urlInput.value.trim()
+    if (!url || adding) return
+    adding = true
+    urlAddBtn.textContent = '…'
+    urlTip.classList.remove('is-error')
+    try {
+      await addSource(url)
+      urlInput.value = ''
+    } catch (error) {
+      urlTip.textContent = `添加失败：${(error as Error)?.message || error}`
+      urlTip.classList.add('is-error')
+    } finally {
+      adding = false
+      urlAddBtn.textContent = '添加'
+      render()
+    }
+  }
+
+  urlAddBtn.addEventListener('click', () => void onAddUrl())
+  urlInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') void onAddUrl()
+  })
+
+  const unsubscribe = subscribe(() => {
+    // 加载进度只在面板打开时重绘
+    if (opened) renderUrls()
+    renderStatus()
+  })
+
+  const onBodyMutation = new MutationObserver(() => {
+    if (opened) placePanel()
+  })
+  onBodyMutation.observe(document.body, { childList: true, subtree: true })
+
+  // ── 初始化 ──────────────────────────────────────────────
+  setEnabled(config.enabled)
+  setDedupe(config.dedupe)
+  resetUrlSources()
+  render()
+
+  void (async () => {
+    await restoreSources()
+    render()
+    if (config.enabled) void ensureMatch()
+  })()
 
   return {
     dispose() {
-      disposed = true
-      if (statsTimer) window.clearInterval(statsTimer)
-      setLoading(null)
-      $panel?.remove()
-      $panel = undefined
-    },
-    load() {
-      void load()
+      detached = true
+      if (anchorTimer !== undefined) window.clearTimeout(anchorTimer)
+      document.removeEventListener('click', onDocumentClick)
+      window.removeEventListener('resize', onResize)
+      onBodyMutation.disconnect()
+      unsubscribe()
+      button.remove()
+      panel.remove()
     },
   }
 }
