@@ -63,8 +63,13 @@ interface HookState {
   stats: HookStats
 }
 
+type LoadCallback = [string, (...args: any[]) => any]
+
 type XHRWithContext = XMLHttpRequest & {
   __kdCtx?: SegRequest
+  __kdUrl?: string
+  __kdCallbacks?: LoadCallback[]
+  __kdAborted?: boolean
   __kdMerged?: { result: ArrayBuffer | null }
   __kdRead?: boolean
 }
@@ -653,13 +658,123 @@ async function waitForLoading() {
   ])
 }
 
+// ── 接手整个 XHR（思路来自 pakku.js）────────────────────────
+//
+// 只读写时拦截不可靠：播放器可能把 load 回调注册在别处、或者根本不读
+// 我们挂的 getter。pakku.js 的办法是干脆不调用原生 send —— 自己把字节
+// 取回来，把 response/status/readyState 变成可写属性后手动回填，
+// 再直接调用播放器注册过的回调。这样播放器拿到的一定是合并后的数据。
+
+const LOAD_EVENTS = ['load', 'readystatechange', 'loadend']
+
+/** 自己把分段字节取回来（GM 请求，绕过页面 CORS 与缓存） */
+function fetchSegBytes(url: string): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    GM_xmlhttpRequest({
+      url,
+      method: 'GET',
+      responseType: 'arraybuffer',
+      timeout: 8000,
+      onload: (res: any) => {
+        // 304 = 这一段没有原生弹幕，按空处理（第三方弹幕照样注入）
+        if (res.status === 304) {
+          resolve(new Uint8Array(0))
+          return
+        }
+        if (res.status >= 200 && res.status < 400) {
+          resolve(new Uint8Array(res.response || new ArrayBuffer(0)))
+          return
+        }
+        reject(new Error(`HTTP ${res.status}`))
+      },
+      onerror: () => reject(new Error('网络错误')),
+      ontimeout: () => reject(new Error('请求超时')),
+    })
+  })
+}
+
+/** 把合并后的字节写成这个 xhr 自己的响应 */
+function writeResponse(xhr: XHRWithContext, bytes: Uint8Array, url: string) {
+  const fields = [
+    'response',
+    'responseText',
+    'responseURL',
+    'readyState',
+    'status',
+    'statusText',
+    'getAllResponseHeaders',
+    'getResponseHeader',
+  ]
+  for (const key of fields) {
+    try {
+      Object.defineProperty(xhr, key, { configurable: true, writable: true })
+    } catch (error) {
+      // 个别环境不让改，忽略
+    }
+  }
+
+  const type = (xhr as any).responseType
+  const buffer = toArrayBuffer(bytes)
+  if (type === 'arraybuffer' || type === 'blob') {
+    ;(xhr as any).response =
+      type === 'blob'
+        ? new Blob([buffer], { type: 'application/octet-stream' })
+        : buffer
+    ;(xhr as any).responseText = ''
+  } else {
+    const text = new TextDecoder('utf-8').decode(bytes)
+    ;(xhr as any).response = text
+    ;(xhr as any).responseText = text
+  }
+
+  ;(xhr as any).responseURL = url
+  ;(xhr as any).readyState = 4
+  ;(xhr as any).status = 200
+  ;(xhr as any).statusText = 'OK'
+  ;(xhr as any).getAllResponseHeaders = () =>
+    'Content-Type: application/octet-stream\r\n'
+  ;(xhr as any).getResponseHeader = (name: string) =>
+    String(name).toLowerCase() === 'content-type'
+      ? 'application/octet-stream'
+      : null
+}
+
+/** 按注册顺序调用播放器自己的回调，事件对象照着 LoadEvent 伪造 */
+function fireCallbacks(xhr: XHRWithContext, callbacks: LoadCallback[]) {
+  for (const [type, cb] of callbacks) {
+    const event = {
+      type,
+      target: xhr,
+      currentTarget: xhr,
+      srcElement: xhr,
+      isTrusted: true,
+      bubbles: false,
+      cancelable: false,
+      composed: false,
+      defaultPrevented: false,
+      eventPhase: 2,
+      timeStamp: 0,
+      lengthComputable: false,
+      loaded: 1,
+      total: 1,
+    }
+    try {
+      cb.call(xhr, event)
+    } catch (error) {
+      console.warn('[danmaku-enhance] 播放器回调执行失败', type, error)
+    }
+  }
+}
+
 function patchXHR(target?: any): boolean {
-  const Ctor = target?.XMLHttpRequest || XMLHttpRequest
-  const proto = Ctor.prototype as XHRWithContext
+  const Ctor = target?.XMLHttpRequest || XmlHttpRequestCtor
+  const proto = Ctor?.prototype as XHRWithContext
   if (!proto) return false
   if ((proto as any).__kdPatched) return true
+
   const originalOpen = proto.open
   const originalSend = proto.send
+  const originalAddEventListener = proto.addEventListener
 
   ;(proto as any).open = function (
     this: XHRWithContext,
@@ -668,11 +783,39 @@ function patchXHR(target?: any): boolean {
     ...rest: unknown[]
   ) {
     try {
-      this.__kdCtx = parseSegRequest(typeof url === 'string' ? url : url.href)
+      const href = typeof url === 'string' ? url : url.href
+      this.__kdUrl = new URL(href, location.href).href
+      this.__kdCtx = parseSegRequest(href)
     } catch (error) {
       this.__kdCtx = undefined
+      this.__kdUrl = undefined
     }
     return (originalOpen as any).apply(this, [method, url, ...rest])
+  }
+
+  // 播放器普遍用 addEventListener 注册 load，先把这些回调截下来
+  ;(proto as any).addEventListener = function (
+    this: XHRWithContext,
+    name: string,
+    cb: any,
+    options?: any
+  ) {
+    if (LOAD_EVENTS.indexOf(name) >= 0 && typeof cb === 'function') {
+      if (!this.__kdCallbacks) this.__kdCallbacks = []
+      this.__kdCallbacks.push([name, cb])
+    }
+    if (name === 'abort') {
+      const mark = () => {
+        this.__kdAborted = true
+      }
+      try {
+        originalAddEventListener.call(this, 'abort', mark, options)
+      } catch (error) {
+        // 忽略
+      }
+      return
+    }
+    return originalAddEventListener.call(this, name, cb, options)
   }
 
   ;(proto as any).send = function (
@@ -685,11 +828,67 @@ function patchXHR(target?: any): boolean {
       return originalSend.call(this, body as any)
     }
 
-    // 立即发送。之前为了等弹弹play 数据把 send 往后推了几秒，
-    // 结果播放器等不到响应就走掉了，之后再也不会读 response。
+    const xhr = this
     state.stats.xhrs++
-    trackRequest(this, request)
-    return originalSend.call(this, body as any)
+    trackRequest(xhr, request)
+
+    const callbacks: LoadCallback[] = (xhr.__kdCallbacks || []).slice()
+    const onReadyState = (xhr as any).onreadystatechange
+    const onLoad = (xhr as any).onload
+    const onLoadEnd = (xhr as any).onloadend
+    if (typeof onReadyState === 'function') {
+      callbacks.push(['readystatechange', onReadyState])
+    }
+    if (typeof onLoad === 'function') callbacks.push(['load', onLoad])
+    if (typeof onLoadEnd === 'function') callbacks.push(['loadend', onLoadEnd])
+
+    const url = xhr.__kdUrl
+    // 没有回调、或者连 URL 都没记下来，就老老实实走原生
+    if (!callbacks.length || !url) {
+      state.stats.lastDetail = callbacks.length
+        ? '没拿到请求 URL，退回原生请求'
+        : '播放器没注册 load 回调，退回原生请求'
+      return originalSend.call(this, body as any)
+    }
+
+    void (async () => {
+      let bytes: Uint8Array | null = null
+      try {
+        bytes = await fetchSegBytes(url)
+      } catch (error) {
+        state.stats.lastDetail = `自行拉取失败退回原生：${
+          (error as Error)?.message || error
+        }`
+      }
+
+      if (xhr.__kdAborted) {
+        state.stats.lastDetail = '接管期间播放器取消了请求'
+        return
+      }
+
+      if (!bytes) {
+        try {
+          originalSend.call(xhr, body as any)
+        } catch (error) {
+          state.stats.lastDetail = `退回原生发送失败：${
+            (error as Error)?.message || error
+          }`
+        }
+        return
+      }
+
+      let merged = bytes
+      try {
+        const injected = buildInjections(request, bytes)
+        if (injected) merged = injected
+      } catch (error) {
+        state.stats.lastDetail = `合并异常：${(error as Error)?.message || error}`
+      }
+
+      writeResponse(xhr, merged, url)
+      state.stats.reads++
+      fireCallbacks(xhr, callbacks)
+    })()
   }
 
   ;(proto as any).__kdPatched = true
@@ -797,7 +996,6 @@ export function installHook() {
 
   patchXHR(window)
   patchFetch(window)
-  installResponseGetter(window)
 
   // 沙箱模式下页面用的是自己那份构造器/fetch，得单独打
   if (page !== window) {
@@ -811,18 +1009,12 @@ export function installHook() {
     } catch (error) {
       console.warn('[danmaku-enhance] 无法拦截页面 fetch', error)
     }
-    try {
-      installResponseGetter(page)
-    } catch (error) {
-      console.warn('[danmaku-enhance] 无法拦截页面 response', error)
-    }
   }
 
-  const hooked = findResponseAccessor(XmlHttpRequestCtor.prototype)
   console.info('[danmaku-enhance] 已安装弹幕拦截', {
     sameWindow: page === window,
     hookUrl: SEG_PATH.source,
-    responseHooked: !!hooked && (hooked.holder as any).__kdResponsePatched === true,
-    hookNote: state.stats.hook,
+    mode: '接管 XHR',
+    hasGM: typeof GM_xmlhttpRequest !== 'undefined',
   })
 }

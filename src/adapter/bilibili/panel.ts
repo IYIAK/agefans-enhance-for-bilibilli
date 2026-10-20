@@ -321,7 +321,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       parts.push(`请求 ${stats.requests}`)
       parts.push(`开闸 ${stats.armed}`)
       parts.push(`通道 xhr${stats.xhrs}/fetch${stats.fetches}`)
-      parts.push(`读取 ${stats.reads}`)
+      parts.push(`接管 ${stats.reads}`)
       parts.push(`合并 ${stats.segments} 段/${stats.injected} 条`)
       let sub = parts.join(' · ')
       if (stats.lastDetail) sub += `｜${stats.lastDetail}`
