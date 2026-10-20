@@ -5,7 +5,14 @@
  * 找不到控制条时退化成一个右下角的小胶囊。
  */
 import type { BiliPageInfo } from './info'
-import { getStats, setComments, setDedupe, setEnabled, setLoading } from './hook'
+import {
+  forceReloadDanmaku,
+  getStats,
+  setComments,
+  setDedupe,
+  setEnabled,
+  setLoading,
+} from './hook'
 import {
   MatchError,
   chooseEpisode,
@@ -264,6 +271,8 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   let tried: string[] = []
   let notice = ''
   let busy = false
+  let reloadHint = ''
+  let reloading = false
 
   function resetMatch(nextNotice = '') {
     anime = undefined
@@ -307,9 +316,13 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     }
     if (anime && episode) {
       statusMain.textContent = `${anime.name} · ${episode.name}`
-      statusSub.textContent = stats.injected
-        ? `弹弹play 已合并 ${stats.segments} 段 / ${stats.injected} 条`
-        : '等播放器请求弹幕…'
+      // 分成两种：拦截到几次请求 / 实际合并了几段几条
+      if (stats.requests) {
+        statusSub.textContent = `拦截 ${stats.requests} 次请求 · 合并 ${stats.segments} 段 / ${stats.injected} 条`
+      } else {
+        statusSub.textContent =
+          reloadHint || '还没拦截到弹幕请求（播放器可能已缓存本段）'
+      }
       return
     }
     if (anime) {
@@ -423,6 +436,32 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   }
 
   // ── 匹配动作 ────────────────────────────────────────────
+
+  /**
+   * 弹幕就绪后让播放器重新取一次当前分段。
+   *
+   * 播放器按 cid 缓存分段，开关在播放中途打开时当前段早就取过了，
+   * 不会再发请求，hook 也就没机会合并。这里主动触发一次重新加载，
+   * 并把命中的方法名放进状态行，方便确认到底生效没有。
+   */
+  function reloadDanmaku() {
+    if (reloading) return
+    reloading = true
+    reloadHint = '正在让播放器重新加载弹幕…'
+    render()
+
+    void forceReloadDanmaku().then((method) => {
+      reloading = false
+      reloadHint = method
+        ? ''
+        : '弹幕已就绪，但没能触发重新请求（拖一下进度条或重开开关）'
+      if (method) {
+        console.info('[danmaku-enhance] 已通过', method, '触发弹幕重新加载')
+      }
+      render()
+    })
+  }
+
   async function ensureMatch() {
     if (!config.enabled) return
     busy = true
@@ -544,6 +583,8 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       setComments(comments)
       rememberMatch(info, current, ep)
       render()
+      // 弹幕就绪：让播放器把当前分段重新取一遍，否则已缓存的分段不会经过 hook
+      reloadDanmaku()
     } catch (error) {
       busy = false
       notice = `加载弹幕失败：${(error as Error)?.message || error}`

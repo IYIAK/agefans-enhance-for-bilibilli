@@ -29,7 +29,11 @@ interface SegRequest {
 }
 
 interface HookStats {
+  /** 拦截到的弹幕分段请求数（不管开关是否开启都统计） */
+  requests: number
+  /** 实际合并过的分段数 */
   segments: number
+  /** 实际注入的弹幕条数 */
   injected: number
 }
 
@@ -50,7 +54,7 @@ const state: HookState = {
   dedupe: true,
   comments: null,
   loading: null,
-  stats: { segments: 0, injected: 0 },
+  stats: { requests: 0, segments: 0, injected: 0 },
 }
 
 let installed = false
@@ -96,7 +100,7 @@ export function resetPageState() {
   state.comments = null
   state.loading = null
   state.cid = undefined
-  state.stats = { segments: 0, injected: 0 }
+  state.stats = { requests: 0, segments: 0, injected: 0 }
 }
 
 function toNumber(value: string | null): number | undefined {
@@ -275,6 +279,101 @@ function buildInjections(
   return merged
 }
 
+/** 记一次弹幕分段请求（不管开关是否开启都记，方便诊断） */
+function countRequest(request: SegRequest | undefined) {
+  if (!request) return
+  state.stats.requests++
+}
+
+/**
+ * 让播放器重新拉一遍弹幕。
+ *
+ * 播放器按 cid 把分段缓存在内存里，开关是在视频已经在播之后才打开的，
+ * 这时当前分段早已请求过、不会再发请求，hook 也就没机会合并。
+ * 这里挨个试常见的重新加载手段，每种都等一会儿看请求计数有没有涨。
+ */
+const RELOAD_WAIT_MS = 800
+
+function requestTicks() {
+  return state.stats.requests
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms))
+}
+
+/** 播放器控制器（不同版本挂在不同的全局变量上） */
+function playerController(): any {
+  const win = window as any
+  return (
+    win.player ||
+    win.bilibiliPlayer ||
+    win.__BILI_PLAYER__ ||
+    win.playerConfig?.player
+  )
+}
+
+export async function forceReloadDanmaku(): Promise<string> {
+  const player = playerController()
+  const video = document.querySelector('video') as HTMLVideoElement | null
+
+  const attempts: { name: string; fn: () => void }[] = [
+    { name: 'player.reloadDanmaku', fn: () => player?.reloadDanmaku?.() },
+    {
+      name: 'player.setDanmaku',
+      fn: () => player?.setDanmaku?.(true),
+    },
+    {
+      name: '弹幕开关切换',
+      fn: () => {
+        // 关掉再打开，播放器会清掉分段缓存并重新请求
+        const btn = document.querySelector(
+          [
+            '.bpx-player-ctrl-dm',
+            '.bpx-player-dm-switch',
+            '.bilibili-player-video-btn-danmaku',
+            '[aria-label*="弹幕"]',
+            '[aria-label*="danmaku" i]',
+          ].join(',')
+        ) as HTMLElement | null
+        if (!btn) return
+        btn.click()
+        setTimeout(() => btn.click(), 150)
+      },
+    },
+    {
+      name: 'player.seek',
+      fn: () => {
+        if (!video) return
+        const t = video.currentTime
+        player?.seek?.(Math.max(0, t - 0.3))
+        player?.seek?.(t)
+      },
+    },
+    {
+      name: 'video.currentTime',
+      fn: () => {
+        if (!video) return
+        const t = video.currentTime
+        video.currentTime = Math.max(0, t - 0.3)
+        video.currentTime = t
+      },
+    },
+  ]
+
+  for (const attempt of attempts) {
+    try {
+      const before = requestTicks()
+      attempt.fn()
+      await sleep(RELOAD_WAIT_MS)
+      if (requestTicks() > before) return attempt.name
+    } catch (error) {
+      console.warn('[danmaku-enhance] 重新加载弹幕失败', attempt.name, error)
+    }
+  }
+  return ''
+}
+
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(
     bytes.byteOffset,
@@ -342,8 +441,11 @@ async function waitForLoading() {
   ])
 }
 
-function patchXHR() {
-  const proto = XMLHttpRequest.prototype as XHRWithContext
+function patchXHR(target?: any): boolean {
+  const Ctor = target?.XMLHttpRequest || XMLHttpRequest
+  const proto = Ctor.prototype as XHRWithContext
+  if (!proto) return false
+  if ((proto as any).__kdPatched) return true
   const originalOpen = proto.open
   const originalSend = proto.send
 
@@ -366,6 +468,7 @@ function patchXHR() {
     body?: Document | XMLHttpRequestBodyInit | null
   ) {
     const request = this.__kdCtx
+    countRequest(request)
     if (!request || !state.enabled) {
       return originalSend.call(this, body as any)
     }
@@ -384,13 +487,16 @@ function patchXHR() {
       }
     })()
   }
+
+  ;(proto as any).__kdPatched = true
+  return true
 }
 
-function patchFetch() {
-  const originalFetch = window.fetch
+function patchFetch(target: any) {
+  const originalFetch = target.fetch
   if (typeof originalFetch !== 'function') return
 
-  window.fetch = function (
+  target.fetch = function (
     this: Window,
     input: RequestInfo | URL,
     init?: RequestInit
@@ -408,6 +514,7 @@ function patchFetch() {
       request = undefined
     }
 
+    countRequest(request)
     if (!request || !state.enabled) {
       return originalFetch.call(this, input, init)
     }
@@ -438,12 +545,43 @@ function patchFetch() {
         return response
       }
     })()
-  } as typeof window.fetch
+  } as any
+}
+
+/**
+ * 油猴沙箱里的 window 是代理对象，直接改 window.fetch / 全局变量
+ * 常常打不到页面自己的那份。优先拿到页面真实的 window。
+ */
+function pageWindow(): any {
+  const win = window as any
+  return win.unsafeWindow || win.wrappedJSObject || win
 }
 
 export function installHook() {
   if (installed) return
   installed = true
-  patchXHR()
-  patchFetch()
+
+  const page = pageWindow()
+
+  patchXHR(window)
+  patchFetch(window)
+
+  // 沙箱模式下页面用的是自己那份构造器/fetch，得单独打
+  if (page !== window) {
+    try {
+      patchXHR(page)
+    } catch (error) {
+      console.warn('[danmaku-enhance] 无法拦截页面 XHR', error)
+    }
+    try {
+      patchFetch(page)
+    } catch (error) {
+      console.warn('[danmaku-enhance] 无法拦截页面 fetch', error)
+    }
+  }
+
+  console.info('[danmaku-enhance] 已安装弹幕拦截', {
+    sameWindow: page === window,
+    hookUrl: SEG_PATH.source,
+  })
 }
