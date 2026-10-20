@@ -1,23 +1,25 @@
 {
-  "name": "agefans",
+  "name": "danmaku-enhance",
   "version": "1.60.3",
   "description": "增强播放功能，实现自动换集、无缝换集、画中画、历史记录、断点续播、弹幕等功能。适配agefans、NT动漫、bimiacg、mutefun、次元城、稀饭动漫，并给哔哩哔哩注入弹弹play 弹幕",
   "main": "index.user.js",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/IronKinoko/agefans-enhance.git"
+    "url": "git+https://github.com/IYIAK/agefans-enhance-for-bilibilli.git"
   },
   "keywords": [
     "agefans",
+    "bilibili",
+    "danmaku",
     "userscript"
   ],
   "author": "IronKinoko <kinoko.main@gmail.com>",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/IronKinoko/agefans-enhance/issues"
+    "url": "https://github.com/IYIAK/agefans-enhance-for-bilibilli/issues"
   },
-  "homepage": "https://github.com/IronKinoko/agefans-enhance#readme",
+  "homepage": "https://github.com/IYIAK/agefans-enhance-for-bilibilli#readme",
   "scripts": {
     "dev": "bocchi dev",
     "build": "bocchi build",

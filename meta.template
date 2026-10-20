@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         agefans Enhance
-// @namespace    https://github.com/IronKinoko/agefans-enhance
-// @icon         https://www.age.tv/favicon.ico
+// @name         Danmaku Enhance
+// @namespace    https://github.com/IYIAK/agefans-enhance-for-bilibilli
+// @icon         https://www.bilibili.com/favicon.ico
 // @version      #version#
 // @description  #description#
 // @author       IronKinoko
@@ -41,8 +41,8 @@
 // @grant        GM_registerMenuCommand
 // @connect      dandanplay.net
 // @license      MIT
-// @downloadURL  https://github.com/IronKinoko/agefans-enhance/raw/gh-pages/index.user.js
-// @updateURL    https://github.com/IronKinoko/agefans-enhance/raw/gh-pages/index.user.js
+// @downloadURL  https://github.com/IYIAK/agefans-enhance-for-bilibilli/raw/gh-pages/index.user.js
+// @updateURL    https://github.com/IYIAK/agefans-enhance-for-bilibilli/raw/gh-pages/index.user.js
 // ==/UserScript==
 
 /**

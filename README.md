@@ -1,4 +1,6 @@
-# agefans enhance
+# Danmaku Enhance
+
+> 基于 [agefans enhance](https://github.com/IronKinoko/agefans-enhance) 的 fork，额外支持把弹弹play 的弹幕注入哔哩哔哩原生播放器。
 
 增强网站播放功能，实现自动换集、画中画、历史记录、断点续播、弹幕等功能
 

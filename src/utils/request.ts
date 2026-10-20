@@ -20,14 +20,14 @@ export function request<T = any>(opts: RequestOptions) {
   }
 
   return new Promise<T>((resolve, reject) => {
-    console.log('[agefans-enhance]', url)
+    console.log('[danmaku-enhance]', url)
     GM_xmlhttpRequest({
       url,
       method: method || 'GET',
       responseType: 'json',
       headers: opts.headers,
       onload: (res: any) => {
-        console.log('[agefans-enhance]', res, res.response)
+        console.log('[danmaku-enhance]', res, res.response)
         resolve(res.response)
       },
       onerror: reject,
