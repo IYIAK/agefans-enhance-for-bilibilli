@@ -57,7 +57,10 @@ interface HookState {
   stats: HookStats
 }
 
-type XHRWithContext = XMLHttpRequest & { __kdCtx?: SegRequest }
+type XHRWithContext = XMLHttpRequest & {
+  __kdCtx?: SegRequest
+  __kdMerged?: { result: ArrayBuffer | null }
+}
 
 const state: HookState = {
   enabled: false,
@@ -466,10 +469,8 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   ) as ArrayBuffer
 }
 
-const RESPONSE_GETTER = Object.getOwnPropertyDescriptor(
-  XMLHttpRequest.prototype,
-  'response'
-)?.get
+/** 记下模块加载时的构造器，换成页面 realm 之前也能用 */
+const XmlHttpRequestCtor = XMLHttpRequest
 
 /**
  * 跨 realm 时 `x instanceof ArrayBuffer` 会失效（页面那份 ArrayBuffer
@@ -488,75 +489,77 @@ function asBytes(raw: unknown): Uint8Array | null {
 }
 
 
-/** 读取 raw response，跨 realm 时退回原型 getter */
-function readRawResponse(xhr: XHRWithContext): unknown {
-  const own = (xhr as any).__kdRawResponse
-  if (own !== undefined) return own
-  try {
-    if (RESPONSE_GETTER) return RESPONSE_GETTER.call(xhr)
-  } catch (error) {
-    // 跨 realm 调沙箱的 getter 会 Illegal invocation，退回直接读
+/**
+ * 合并逻辑本身。raw 由调用方从「原始 getter」取出，保证不会递归。
+ * 同一个 xhr 只合并一次，后续读取复用结果。
+ */
+function mergeResponse(
+  xhr: XHRWithContext,
+  request: SegRequest,
+  raw: unknown
+): unknown {
+  const cached = xhr.__kdMerged
+  if (cached) return cached.result ?? raw
+
+  if (xhr.readyState !== 4) return raw
+  if (xhr.status !== 200) {
+    // 304 = 该分段没有弹幕，属于正常情况
+    if (xhr.status !== 304) state.stats.lastDetail = `响应状态 ${xhr.status}`
+    return raw
   }
-  try {
-    const proto = Object.getPrototypeOf(xhr) as any
-    const getter = Object.getOwnPropertyDescriptor(proto, 'response')?.get
-    return getter ? getter.call(xhr) : (xhr as any).response
-  } catch (error) {
-    return (xhr as any).response
+
+  const bytes = asBytes(raw)
+  if (!bytes) {
+    state.stats.lastDetail = `响应不是 ArrayBuffer（responseType=${JSON.stringify(
+      (xhr as any).responseType
+    )}，实际 ${Object.prototype.toString.call(raw)}）`
+    return raw
   }
+
+  let result: ArrayBuffer | null = null
+  try {
+    const merged = buildInjections(request, bytes)
+    if (merged) result = toArrayBuffer(merged)
+  } catch (error) {
+    const msg = (error as Error)?.message || String(error)
+    state.stats.lastDetail = `合并异常：${msg}`
+    console.warn('[danmaku-enhance] 合并弹幕失败', error)
+  }
+  // 只在真的合并出内容时缓存：否则等弹弹play 数据到位后，
+  // 播放器再读一次同一个响应还能补上。
+  if (result) xhr.__kdMerged = { result }
+  return result ?? raw
 }
 
 /**
- * 用实例上的 getter 覆盖 xhr.response：播放器可能在我们之前注册
- * onreadystatechange，所以必须在 send 前就把 getter 装好，读取时再合并。
+ * 在原型上替换 response getter。之前用实例上的 defineProperty，
+ * 但只要页面某处缓存了原型 getter 再 .call(xhr)，实例属性就被绕过，
+ * 表现为「请求发出去了、播放器一次都没读」。
  */
-function defineShadowResponse(xhr: XHRWithContext, request: SegRequest) {
-  let computed = false
-  let result: ArrayBuffer | null = null
+function installResponseGetter(target?: any): boolean {
+  const Ctor = target?.XMLHttpRequest || XmlHttpRequestCtor
+  const proto = Ctor?.prototype
+  if (!proto) return false
+  if ((proto as any).__kdResponsePatched) return true
 
-  try {
-    Object.defineProperty(xhr, 'response', {
-      configurable: true,
-      enumerable: true,
-      get() {
-        state.stats.reads++
-        const raw = readRawResponse(xhr)
+  const desc = Object.getOwnPropertyDescriptor(proto, 'response')
+  if (!desc || !desc.get) return false
+  const originalGet = desc.get
 
-        if (computed) return result ?? raw
-        if (xhr.readyState !== 4) return raw
-        if (xhr.status !== 200) {
-          // 304 = 该分段没有弹幕，属于正常情况
-          if (xhr.status !== 304) state.stats.lastDetail = `响应状态 ${xhr.status}`
-          return raw
-        }
+  Object.defineProperty(proto, 'response', {
+    configurable: true,
+    enumerable: desc.enumerable,
+    get(this: XHRWithContext) {
+      const raw = originalGet.call(this)
+      const ctx = this.__kdCtx
+      if (!ctx || !state.enabled) return raw
+      state.stats.reads++
+      return mergeResponse(this, ctx, raw)
+    },
+  })
 
-        const bytes = asBytes(raw)
-        if (!bytes) {
-          state.stats.lastDetail = `响应不是 ArrayBuffer（responseType=${JSON.stringify(
-            (xhr as any).responseType
-          )}，实际 ${Object.prototype.toString.call(raw)}）`
-          return raw
-        }
-
-        computed = true
-        try {
-          const merged = buildInjections(request, bytes)
-          if (merged) result = toArrayBuffer(merged)
-        } catch (error) {
-          const msg = (error as Error)?.message || String(error)
-          state.stats.lastDetail = `合并异常：${msg}`
-          console.warn('[danmaku-enhance] 合并弹幕失败', error)
-        }
-        return result ?? raw
-      },
-    })
-  } catch (error) {
-    // 极少数环境不允许覆盖，退化为不合并
-    state.stats.lastDetail = `无法覆盖 xhr.response：${
-      (error as Error)?.message || error
-    }`
-    console.warn('[danmaku-enhance] 无法拦截弹幕响应', error)
-  }
+  ;(proto as any).__kdResponsePatched = true
+  return true
 }
 
 async function waitForLoading() {
@@ -604,26 +607,10 @@ function patchXHR(target?: any): boolean {
       return originalSend.call(this, body as any)
     }
 
-    const xhr = this
+    // 立即发送。之前为了等弹弹play 数据把 send 往后推了几秒，
+    // 结果播放器等不到响应就走掉了，之后再也不会读 response。
     state.stats.xhrs++
-    // 先同步装好 getter：一旦进入异步等待，播放器可能 abort/复用这个 xhr，
-    // 等回来时 readyState 已不是 1，就再也没机会合并了。
-    defineShadowResponse(xhr, request)
-
-    void (async () => {
-      await waitForLoading()
-      if (xhr.readyState !== 1) {
-        // 已经完成或已被 abort，getter 装不上了
-        state.stats.lastDetail = `发送时 readyState=${xhr.readyState}（等待期间已被处理或取消）`
-        return
-      }
-      try {
-        originalSend.call(xhr, body as any)
-      } catch (error) {
-        state.stats.lastDetail = `发送失败：${(error as Error)?.message || error}`
-        console.warn('[danmaku-enhance] 发送弹幕请求失败', error)
-      }
-    })()
+    return originalSend.call(this, body as any)
   }
 
   ;(proto as any).__kdPatched = true
@@ -731,6 +718,7 @@ export function installHook() {
 
   patchXHR(window)
   patchFetch(window)
+  installResponseGetter(window)
 
   // 沙箱模式下页面用的是自己那份构造器/fetch，得单独打
   if (page !== window) {
@@ -744,10 +732,16 @@ export function installHook() {
     } catch (error) {
       console.warn('[danmaku-enhance] 无法拦截页面 fetch', error)
     }
+    try {
+      installResponseGetter(page)
+    } catch (error) {
+      console.warn('[danmaku-enhance] 无法拦截页面 response', error)
+    }
   }
 
   console.info('[danmaku-enhance] 已安装弹幕拦截', {
     sameWindow: page === window,
     hookUrl: SEG_PATH.source,
+    responseHooked: (XmlHttpRequestCtor.prototype as any).__kdResponsePatched === true,
   })
 }
