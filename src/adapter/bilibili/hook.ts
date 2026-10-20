@@ -1,4 +1,6 @@
 import type { Comment } from '../../player/plugins/danmaku/types'
+import { applyFilter, isSimilar, loadFilter } from './filters'
+import type { FilterConfig } from './filters'
 import { appendElems, decodeElems } from './proto'
 import type { InjectElem, NativeElem } from './proto'
 import { collectItems } from './sources/state'
@@ -53,6 +55,10 @@ interface HookStats {
   lastMergedSeg: number | null
   /** 当前来源总共可用的弹幕条数（不受分段窗口限制） */
   available: number
+  /** 被过滤器拦下的条数（屏蔽词 + 类型 + 密度） */
+  filtered: number
+  /** 被合并掉的重复弹幕条数 */
+  merged: number
   /** 最近一次分段请求的生命周期（readyState/status/是否被中止/是否读了 response） */
   lastState: string
   /** response getter 的安装结果，装不上时这里写原因 */
@@ -147,6 +153,8 @@ function emptyStats(): HookStats {
     lastSeg: null,
     lastMergedSeg: null,
     available: 0,
+    filtered: 0,
+    merged: 0,
     lastState: '',
     hook: '',
   }
@@ -273,6 +281,10 @@ interface PickResult {
   picked: InjectElem[]
   /** 因不在本段时间窗内被丢掉的条数 */
   outOfWindow: number
+  /** 被屏蔽词 / 类型开关 / 密度上限丢掉的条数 */
+  filtered: number
+  /** 与相同时段内其他弹幕合并掉的条数 */
+  merged: number
   /** 因与原生弹幕重复被丢掉的条数 */
   dupNative: number
   /** 因与已注入弹幕重复被丢掉的条数 */
@@ -281,39 +293,80 @@ interface PickResult {
   empty: number
 }
 
+/** 合并时的分组：同一句只留一条代表，另外记下出现了几次 */
+interface Group {
+  timeMs: number
+  mode: 1 | 4 | 5
+  color: number
+  text: string
+  count: number
+}
+
 function pickComments(
   candidates: Candidate[],
   request: SegRequest,
-  nativeElems: NativeElem[]
+  nativeElems: NativeElem[],
+  filter: FilterConfig
 ): PickResult {
   const nativeTimes = new Map<string, number[]>()
   for (const elem of nativeElems) {
     addTime(nativeTimes, normalizeText(elem.text), elem.timeMs)
   }
 
-  const injectedTimes = new Map<string, number[]>()
-  const picked: InjectElem[] = []
   let outOfWindow = 0
-  let dupNative = 0
-  let dupInjected = 0
   let empty = 0
-
+  const windowed: Candidate[] = []
   for (const item of candidates) {
-    if (picked.length >= MAX_PER_SEGMENT) break
-
-    const { timeMs } = item
-    if (timeMs < request.startMs || timeMs >= request.endMs) {
+    if (item.timeMs < request.startMs || item.timeMs >= request.endMs) {
       outOfWindow++
       continue
     }
-
-    const text = item.text
-    if (!text) {
+    if (!item.text) {
       empty++
       continue
     }
+    windowed.push(item)
+  }
 
-    const key = normalizeText(text)
+  const outcome = applyFilter(windowed, filter)
+  const filtered =
+    outcome.blockedKeyword + outcome.blockedMode + outcome.blockedDensity
+
+  // 合并时段内内容相近的弹幕（pakku 的「合并重复弹幕」）
+  const windowMs = Math.max(0, filter.mergeWindowSec) * 1000
+  const groups: Group[] = []
+  let merged = 0
+  for (const item of outcome.kept) {
+    let hit: Group | undefined
+    if (filter.enabled && filter.mergeSimilar && windowMs > 0) {
+      for (let i = groups.length - 1; i >= 0; i--) {
+        const group = groups[i]
+        if (item.timeMs - group.timeMs > windowMs) break
+        if (group.mode !== item.mode) continue
+        if (isSimilar(group.text, item.text)) {
+          hit = group
+          break
+        }
+      }
+    }
+    if (hit) {
+      hit.count++
+      merged++
+      continue
+    }
+    groups.push({ ...item, count: 1 })
+  }
+
+  const injectedTimes = new Map<string, number[]>()
+  const picked: InjectElem[] = []
+  let dupNative = 0
+  let dupInjected = 0
+
+  for (const group of groups) {
+    if (picked.length >= MAX_PER_SEGMENT) break
+
+    const { timeMs } = group
+    const key = normalizeText(group.text)
     if (state.dedupe) {
       if (hasNear(nativeTimes, key, timeMs, NATIVE_DEDUPE_MS)) {
         dupNative++
@@ -325,18 +378,28 @@ function pickComments(
       }
     }
 
+    // 合并过的弹幕在末尾标出次数，和 pakku 的「显示合并数」一致
+    const text = group.count > 1 ? `${group.text} (${group.count})` : group.text
     picked.push({
       timeMs,
-      mode: item.mode,
-      color: item.color,
+      mode: group.mode,
+      color: group.color,
       text,
-      dmid: makeDmid(text, timeMs),
+      dmid: makeDmid(group.text, timeMs),
       oid: request.oid,
     })
     addTime(injectedTimes, key, timeMs)
   }
 
-  return { picked, outOfWindow, dupNative, dupInjected, empty }
+  return {
+    picked,
+    outOfWindow,
+    filtered,
+    merged,
+    dupNative,
+    dupInjected,
+    empty,
+  }
 }
 
 /** 当前播放位置（毫秒），拿不到返回 -1 */
@@ -384,11 +447,15 @@ function buildInjections(
       } 条）`
     )
   }
+  // 合并要求按时间有序，两路来源各自有序但拼起来不一定
+  candidates.sort((a, b) => a.timeMs - b.timeMs)
 
   const nativeElems = state.dedupe ? decodeElems(bytes) : []
   state.stats.available = candidates.length
-  const result = pickComments(candidates, request, nativeElems)
+  const result = pickComments(candidates, request, nativeElems, loadFilter())
   const { picked: elems } = result
+  if (result.filtered) state.stats.filtered += result.filtered
+  if (result.merged) state.stats.merged += result.merged
   if (!elems.length) {
     // 打开右侧弹幕列表会一次性预取全部分段，那些段落在播放位置之外，
     // 本来就没有候选弹幕，不该显示成「全被丢弃」。
@@ -411,7 +478,7 @@ function buildInjections(
       if (item.timeMs > max) max = item.timeMs
     }
     return detail(
-      `候选 ${candidates.length} 条全被丢弃（窗外 ${result.outOfWindow}／撞原生 ${result.dupNative}／自撞 ${result.dupInjected}／空 ${result.empty}；本段 ${Math.round(
+      `候选 ${candidates.length} 条全被丢弃（窗外 ${result.outOfWindow}／过滤 ${result.filtered}／合并 ${result.merged}／撞原生 ${result.dupNative}／自撞 ${result.dupInjected}／空 ${result.empty}；本段 ${Math.round(
         request.startMs / 1000
       )}-${Math.round(request.endMs / 1000)}s，原生 ${nativeElems.length} 条，候选 ${(
         min / 1000

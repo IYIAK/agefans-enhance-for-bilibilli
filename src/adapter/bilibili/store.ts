@@ -2,7 +2,8 @@
 import { gm } from '../../utils/storage'
 
 const CONFIG_KEY = 'bilibili-danmaku-config-v2'
-const SOURCES_KEY = 'bilibili-danmaku-sources-v2'
+/** v3 起 URL 来源按「页面」分开存，避免在别的视频上加的来源跑过来 */
+const SOURCES_KEY = 'bilibili-danmaku-sources-v3'
 const OFFSET_KEY = 'bilibili-danmaku-offset-v2'
 
 export interface BiliConfig {
@@ -31,13 +32,34 @@ export interface SavedSource {
   offsetMs: number
 }
 
-export function storageUrlSources(list?: SavedSource[]): SavedSource[] {
-  if (list) {
-    gm.setItem(SOURCES_KEY, list)
-    return list
+type SourceMap = Record<string, SavedSource[]>
+
+function readSourceMap(): SourceMap {
+  const raw = gm.getItem<any>(SOURCES_KEY, {})
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const map: SourceMap = {}
+  for (const [key, value] of Object.entries(raw)) {
+    if (!Array.isArray(value)) continue
+    map[key] = value.filter(
+      (o: any) => o && typeof o.url === 'string'
+    ) as SavedSource[]
   }
-  const raw = gm.getItem<any>(SOURCES_KEY, [])
-  return Array.isArray(raw) ? raw.filter((o) => o && typeof o.url === 'string') : []
+  return map
+}
+
+/** 读某个页面自己的 URL 来源列表 */
+export function loadSources(pageKey: string): SavedSource[] {
+  if (!pageKey) return []
+  return readSourceMap()[pageKey] || []
+}
+
+/** 覆盖某个页面的 URL 来源列表 */
+export function saveSources(pageKey: string, list: SavedSource[]) {
+  if (!pageKey) return
+  const map = readSourceMap()
+  if (list.length) map[pageKey] = list
+  else delete map[pageKey]
+  gm.setItem(SOURCES_KEY, map)
 }
 
 /** 读/写某条来源的时间偏移（毫秒） */

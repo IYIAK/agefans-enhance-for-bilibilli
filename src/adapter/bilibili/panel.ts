@@ -26,6 +26,8 @@ import {
   squash,
 } from './match'
 import type { AnimeItem, EpisodeItem } from './match'
+import { loadFilter, saveFilter } from './filters'
+import type { FilterConfig } from './filters'
 import { loadConfig, saveConfig } from './store'
 import type { BiliConfig } from './store'
 import {
@@ -35,6 +37,7 @@ import {
   resetUrlSources,
   restoreSources,
   setOffset,
+  setPageKey,
   subscribe,
 } from './sources/state'
 import type { UrlSourceEntry } from './sources/state'
@@ -86,6 +89,15 @@ function findOne<T extends Element = HTMLElement>(selectors: string[]) {
 function formatOffset(offsetMs: number) {
   const value = Math.round(offsetMs / 100) / 10
   return String(value)
+}
+
+/**
+ * URL 来源的页面标识。优先用 cid（同一集的不同分P、不同线路都能区分开），
+ * 拿不到 cid 时退回「番名 + 集数」。
+ */
+function pageKeyOf(info: BiliPageInfo) {
+  if (info.cid) return `cid:${info.cid}`
+  return `${info.seriesName || ''}#${info.episode ?? ''}`
 }
 
 export function mountPanel(info: BiliPageInfo): PanelHandle {
@@ -151,7 +163,16 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   const urlTip = el('div', `${ROOT_CLASS}__tip`)
 
   // 弹弹play
-  const ddpTitle = el('div', `${ROOT_CLASS}__section`, '弹弹play 匹配')
+  const ddpTitle = el('div', `${ROOT_CLASS}__section ${ROOT_CLASS}__section--row`)
+  ddpTitle.append(el('span', undefined, '弹弹play 匹配'))
+  const rematchBtn = el('button', `${ROOT_CLASS}__icon-text`, '重新匹配')
+  rematchBtn.type = 'button'
+  rematchBtn.title = '忘掉当前选择，重新自动匹配'
+  const changeAnimeBtn = el('button', `${ROOT_CLASS}__icon-text`, '换番剧')
+  changeAnimeBtn.type = 'button'
+  changeAnimeBtn.title = '用下面的关键词重新搜索，再从候选里挑'
+  ddpTitle.append(rematchBtn, changeAnimeBtn)
+
   const searchRow = el('div', `${ROOT_CLASS}__row ${ROOT_CLASS}__row--input`)
   const searchInput = el('input', `${ROOT_CLASS}__input`) as HTMLInputElement
   searchInput.type = 'text'
@@ -164,11 +185,139 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   const episodeSelect = el('select', `${ROOT_CLASS}__select`) as HTMLSelectElement
   const matchTip = el('div', `${ROOT_CLASS}__tip`)
 
+  // 过滤器（对齐 pakku 的核心能力）
+  let filterConfig: FilterConfig = loadFilter()
+
+  const filterTitle = el(
+    'div',
+    `${ROOT_CLASS}__section ${ROOT_CLASS}__section--row`
+  )
+  filterTitle.append(el('span', undefined, '过滤器'))
+  const filterToggle = el(
+    'button',
+    `${ROOT_CLASS}__icon-text`,
+    filterConfig.enabled ? '已启用' : '已关闭'
+  )
+  filterToggle.type = 'button'
+  filterToggle.title = '过滤只作用于第三方弹幕，不影响 B 站原生弹幕'
+  const filterReload = el('button', `${ROOT_CLASS}__icon-text`, '重新加载')
+  filterReload.type = 'button'
+  filterReload.title = '让播放器重新请求当前分段，新设置立刻生效'
+  filterTitle.append(filterToggle, filterReload)
+
+  const keywordBox = el('textarea', `${ROOT_CLASS}__textarea`)
+  keywordBox.rows = 3
+  keywordBox.placeholder = '屏蔽词，一行一个；/正则/i 也行'
+  keywordBox.value = filterConfig.keywords.join('\n')
+
+  const modeRow = el('div', `${ROOT_CLASS}__checks`)
+  const modeItems: { key: 'hideScroll' | 'hideTop' | 'hideBottom'; label: string }[] =
+    [
+      { key: 'hideScroll', label: '滚动' },
+      { key: 'hideTop', label: '顶部' },
+      { key: 'hideBottom', label: '底部' },
+    ]
+  const modeInputs: Partial<
+    Record<'hideScroll' | 'hideTop' | 'hideBottom', HTMLInputElement>
+  > = {}
+  for (const item of modeItems) {
+    const label = el('label', `${ROOT_CLASS}__check`)
+    const input = el('input') as HTMLInputElement
+    input.type = 'checkbox'
+    // 勾上表示「屏蔽这类」
+    input.checked = filterConfig[item.key]
+    modeInputs[item.key] = input
+    label.append(input, el('span', undefined, `屏蔽${item.label}`))
+    modeRow.append(label)
+  }
+
+  const mergeRow = el('div', `${ROOT_CLASS}__row ${ROOT_CLASS}__row--input`)
+  const mergeLabel = el('label', `${ROOT_CLASS}__check`)
+  const mergeInput = el('input') as HTMLInputElement
+  mergeInput.type = 'checkbox'
+  mergeInput.checked = filterConfig.mergeSimilar
+  mergeLabel.append(mergeInput, el('span', undefined, '合并相似弹幕'))
+  const mergeWindow = el('input', `${ROOT_CLASS}__offset`) as HTMLInputElement
+  mergeWindow.type = 'number'
+  mergeWindow.min = '0'
+  mergeWindow.step = '5'
+  mergeWindow.value = String(filterConfig.mergeWindowSec)
+  mergeRow.append(mergeLabel, mergeWindow, el('span', undefined, '秒内'))
+
+  const densityRow = el('div', `${ROOT_CLASS}__row ${ROOT_CLASS}__row--input`)
+  densityRow.append(el('span', undefined, '每分钟最多'))
+  const densityInput = el('input', `${ROOT_CLASS}__offset`) as HTMLInputElement
+  densityInput.type = 'number'
+  densityInput.min = '0'
+  densityInput.step = '10'
+  densityInput.value = String(filterConfig.perMinute)
+  densityRow.append(densityInput, el('span', undefined, '条（0 = 不限）'))
+
+  const filterTip = el(
+    'div',
+    `${ROOT_CLASS}__tip`,
+    '改完对之后加载的分段生效，点「重新加载」可以立刻重来一遍'
+  )
+
+  function readFilterFromDom(): FilterConfig {
+    const next: FilterConfig = {
+      ...filterConfig,
+      keywords: keywordBox.value
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean),
+      hideScroll: !!modeInputs.hideScroll?.checked,
+      hideTop: !!modeInputs.hideTop?.checked,
+      hideBottom: !!modeInputs.hideBottom?.checked,
+      mergeSimilar: mergeInput.checked,
+      mergeWindowSec: Number(mergeWindow.value),
+      perMinute: Number(densityInput.value),
+    }
+    if (!Number.isFinite(next.mergeWindowSec) || next.mergeWindowSec < 0) {
+      next.mergeWindowSec = 0
+    }
+    if (!Number.isFinite(next.perMinute) || next.perMinute < 0) {
+      next.perMinute = 0
+    }
+    return next
+  }
+
+  function onFilterChange() {
+    filterConfig = readFilterFromDom()
+    saveFilter(filterConfig)
+    filterTip.textContent = '已保存；点「重新加载」对已加载的分段也生效'
+    render()
+  }
+
+  keywordBox.addEventListener('change', onFilterChange)
+  for (const item of modeItems) {
+    modeInputs[item.key]?.addEventListener('change', onFilterChange)
+  }
+  mergeInput.addEventListener('change', onFilterChange)
+  mergeWindow.addEventListener('change', onFilterChange)
+  densityInput.addEventListener('change', onFilterChange)
+
+  filterToggle.addEventListener('click', () => {
+    filterConfig = { ...readFilterFromDom(), enabled: !filterConfig.enabled }
+    saveFilter(filterConfig)
+    filterToggle.textContent = filterConfig.enabled ? '已启用' : '已关闭'
+    filterTip.textContent = filterConfig.enabled
+      ? '已启用：屏蔽词 / 类型 / 合并 / 密度都会生效'
+      : '已关闭：第三方弹幕原样注入'
+    render()
+  })
+
   const body = el('div', `${ROOT_CLASS}__body`)
   body.append(
     switchRow,
     dedupeRow,
     status,
+    filterTitle,
+    keywordBox,
+    modeRow,
+    mergeRow,
+    densityRow,
+    filterTip,
     urlTitle,
     urlInputRow,
     urlList,
@@ -208,33 +357,55 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   // ── 面板开关与定位 ──────────────────────────────────────
   let opened = false
 
-  /** 控制条高度，面板要整个浮在它上面，不能压住按钮 */
-  function controlBarHeight() {
-    const bar = document.querySelector(
-      '.bpx-player-control-bottom, .bpx-player-control-wrap, .bpx-player-control'
-    )
-    const height = bar ? bar.getBoundingClientRect().height : 0
-    return height > 0 ? height : 46
+  /**
+   * 控制条的位置。面板要贴着它的上沿浮起来——用播放器 rect.bottom 算不准，
+   * 页面滚动或播放器比视口高的时候 bottom 会跑到屏幕外面去。
+   */
+  function controlBarRect(): DOMRect | null {
+    const selectors = [
+      '.bpx-player-control-wrap',
+      '.bpx-player-control-bottom',
+      '.bpx-player-control',
+      '.bilibili-player-video-control',
+    ]
+    for (const selector of selectors) {
+      const node = document.querySelector(selector)
+      if (!node) continue
+      const rect = node.getBoundingClientRect()
+      if (rect.height > 0) return rect
+    }
+    return null
   }
 
   function placePanel() {
+    const bar = controlBarRect()
     const player = findOne(PLAYER_SELECTORS)
-    if (!player) {
+    if (!bar && !player) {
       panel.style.left = 'auto'
       panel.style.right = '16px'
       panel.style.bottom = '96px'
+      panel.style.maxHeight = '70vh'
       return
     }
-    const rect = player.getBoundingClientRect()
-    const bar = controlBarHeight()
-    const width = Math.min(320, Math.max(280, rect.width * 0.3))
+
+    const playerRect = player ? player.getBoundingClientRect() : null
+    // 右侧对齐播放器；控制条一般比播放器窄，用两者外沿里更靠内的那个
+    const right = Math.min(
+      playerRect ? playerRect.right : window.innerWidth,
+      bar ? bar.right : window.innerWidth
+    )
+    const width = Math.min(320, Math.max(280, (playerRect?.width || 640) * 0.32))
+
+    // 底线 = 控制条上沿再往上一丢丢，和原生设置浮层同一层
+    const barTop = bar ? bar.top : (playerRect?.bottom ?? window.innerHeight) - 46
+    const bottom = Math.max(8, window.innerHeight - barTop + 10)
+    const maxHeight = Math.max(160, window.innerHeight - bottom - 12)
+
     panel.style.width = `${width}px`
-    panel.style.left = `${Math.max(8, rect.right - width - 8)}px`
+    panel.style.left = `${Math.max(8, right - width - 8)}px`
     panel.style.right = 'auto'
-    // 底边贴着控制条上沿，和原生设置浮层一致
-    panel.style.bottom = `${Math.max(8, window.innerHeight - rect.bottom + bar + 8)}px`
-    // 面板高度不超过播放器可视区，避免超出画面
-    panel.style.maxHeight = `${Math.max(180, rect.height - bar - 16)}px`
+    panel.style.bottom = `${bottom}px`
+    panel.style.maxHeight = `${Math.min(maxHeight, window.innerHeight * 0.72)}px`
   }
 
   function open(next: boolean) {
@@ -348,6 +519,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       `接管 ${stats.reads}`,
       `通道 xhr${stats.xhrs}/fetch${stats.fetches}`,
       `合并 ${stats.segments} 段/${stats.injected} 条`,
+      `过滤 ${stats.filtered} 条／合并重复 ${stats.merged} 条`,
       `段 ${stats.lastSeg ?? '-'}／合至 ${stats.lastMergedSeg ?? '-'}`,
     ]
     let line = parts.join(' · ')
@@ -380,8 +552,16 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       statusMain.textContent = `${anime.name} · ${episode.name}`
       // 平时只给人看得懂的一句话，技术细节收进「详情」
       if (stats.injected > 0) {
+        const extra = [
+          stats.filtered ? `过滤 ${stats.filtered}` : '',
+          stats.merged ? `合并 ${stats.merged}` : '',
+        ]
+          .filter(Boolean)
+          .join(' · ')
         statusSub.textContent = stats.available
-          ? `本次共 ${stats.available} 条，已注入 ${stats.injected} 条`
+          ? `本次共 ${stats.available} 条，已注入 ${stats.injected} 条${
+              extra ? `（${extra}）` : ''
+            }`
           : `已注入 ${stats.injected} 条（${stats.segments} 段）`
       } else if (stats.requests === 0) {
         statusSub.textContent = '等待播放器请求弹幕…'
@@ -406,17 +586,22 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
   function renderCandidates() {
     candidates.textContent = ''
-    if (anime || !candidateList.length) {
+    if (!candidateList.length) {
       candidates.hidden = true
       return
     }
     candidates.hidden = false
     candidates.append(
-      el('div', `${ROOT_CLASS}__tip`, '找到多部可能匹配的番剧，请选择：')
+      el(
+        'div',
+        `${ROOT_CLASS}__tip`,
+        anime ? '换一部：' : '找到多部可能匹配的番剧，请选择：'
+      )
     )
     for (const item of candidateList) {
       const row = el('button', `${ROOT_CLASS}__item`, item.name)
       row.title = item.name
+      row.classList.toggle('is-active', !!anime && anime.id === item.id)
       row.addEventListener('click', () => void pickAnime(item))
       candidates.append(row)
     }
@@ -424,7 +609,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
   function renderEpisodes() {
     episodeSelect.textContent = ''
-    if (anime && !episode && episodeOptions.length) {
+    if (anime && episodeOptions.length) {
       episodeSelect.hidden = false
       const placeholder = el('option') as HTMLOptionElement
       placeholder.value = ''
@@ -434,8 +619,11 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
         const opt = el('option') as HTMLOptionElement
         opt.value = String(ep.id)
         opt.textContent = ep.name
+        opt.selected = !!episode && episode.id === ep.id
         episodeSelect.append(opt)
       }
+      // 已经选过的集数要能在下拉里看到，否则用户以为改不了
+      episodeSelect.value = episode ? String(episode.id) : ''
       return
     }
     episodeSelect.hidden = true
@@ -647,7 +835,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
         return
       }
       episode = ep
-      episodeOptions = []
+      // 保留 episodeOptions：用户选错了要能再改回来
       notice = ''
       busy = false
       setComments(comments)
@@ -705,6 +893,18 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     if (e.key === 'Enter') void doSearch()
   })
 
+  rematchBtn.addEventListener('click', () => {
+    candidateList = []
+    void ensureMatch()
+  })
+
+  changeAnimeBtn.addEventListener('click', () => {
+    // 用搜索框里的词重新搜一批候选，挑完会重走集数选择
+    void doSearch()
+  })
+
+  filterReload.addEventListener('click', () => reloadDanmaku())
+
   // ── URL 来源 ────────────────────────────────────────────
   let adding = false
 
@@ -744,6 +944,8 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   onBodyMutation.observe(document.body, { childList: true, subtree: true })
 
   // ── 初始化 ──────────────────────────────────────────────
+  // URL 来源是按页面存的：换视频就不该看到上一个视频的来源
+  setPageKey(pageKeyOf(info))
   setEnabled(config.enabled)
   setDedupe(config.dedupe)
   resetUrlSources()

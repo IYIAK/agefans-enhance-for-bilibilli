@@ -4,7 +4,7 @@
  * 预取由各 UrlSource.load() 自己按顺序发分段、并发 1、遇到 304/空段即停，
  * 这样不需要知道总时长也能拉完整集。
  */
-import { storageUrlSources, storageSourceOffset } from '../store'
+import { loadSources, saveSources, storageSourceOffset } from '../store'
 import { findSource } from './index'
 import type { DanmakuItem, SourceEpisode, UrlSource } from './index'
 
@@ -27,6 +27,10 @@ export interface UrlSourceEntry {
 const MAX_SOURCES = 3
 
 let entries: UrlSourceEntry[] = []
+/**
+ * 当前页面标识。URL 来源按页面分开存：在 A 视频上加的来源不该出现在 B 视频里。
+ */
+let pageKey = ''
 const listeners = new Set<() => void>()
 /** 每条来源的加载序号，用来丢弃过期的回调 */
 const loadSeq = new Map<string, number>()
@@ -171,9 +175,23 @@ async function loadEntry(entry: UrlSourceEntry, source: UrlSource) {
 }
 
 function persist() {
-  storageUrlSources(
+  saveSources(
+    pageKey,
     entries.map((e) => ({ url: e.url, offsetMs: e.offsetMs }))
   )
+}
+
+/** 切换页面时先设好 pageKey，再 restoreSources() */
+export function setPageKey(next: string) {
+  if (next === pageKey) return
+  pageKey = next
+  entries = []
+  loadSeq.clear()
+  notify()
+}
+
+export function getPageKey() {
+  return pageKey
 }
 
 /** 切换到新页面/新分集时清空内存状态（持久化列表保留） */
@@ -183,10 +201,11 @@ export function resetUrlSources() {
   notify()
 }
 
-/** 从持久化恢复上次使用的来源 */
+/** 从持久化恢复**当前页面**上次使用的来源 */
 export async function restoreSources() {
-  const saved = storageUrlSources()
+  const saved = loadSources(pageKey)
   if (!saved.length) return
+  const mine = pageKey
 
   for (const item of saved.slice(0, MAX_SOURCES)) {
     try {
@@ -198,6 +217,8 @@ export async function restoreSources() {
     } catch (error) {
       console.warn('[danmaku-enhance] 恢复 URL 来源失败', item.url, error)
     }
+    // 期间切了页面就别继续往旧列表里塞了
+    if (mine !== pageKey) return
   }
 }
 
