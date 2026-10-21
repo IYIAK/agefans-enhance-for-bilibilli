@@ -569,7 +569,12 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     }
     if (notice) {
       statusMain.textContent = notice
-      statusSub.textContent = tried.length ? `试过：${tried.join(' / ')}` : ''
+      // 候选关键词最多有 12 个，全铺在状态行里会糊成一片，只露前几个
+      const shown = tried.slice(0, 5)
+      const more = tried.length > shown.length ? ` …（共 ${tried.length} 个）` : ''
+      statusSub.textContent = shown.length
+        ? `试过：${shown.join(' / ')}${more}`
+        : ''
       return
     }
     if (anime && episode) {

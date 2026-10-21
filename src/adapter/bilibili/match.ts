@@ -21,11 +21,14 @@ export type AnimeItem = Anime
 export type EpisodeItem = Episode
 
 /** 生成候选关键词时最多发几个搜索请求 */
-const MAX_KEYWORD_TRIES = 6
+const MAX_KEYWORD_TRIES = 12
 /** 关键词与返回番名的最长公共子串低于这个长度就认为无关 */
 const MIN_LCS = 3
 /** 关键词最短长度，弹弹play 少于 2 字会直接报错 */
 const MIN_KEYWORD_LEN = 3
+/** 滑窗长度上下限：太短定位不到番剧，太长又躲不开译名里多出来的词 */
+const WINDOW_MIN_LEN = 6
+const WINDOW_MAX_LEN = 14
 
 export interface MatchContext {
   /** 已经试过的关键词，失败时展示给用户 */
@@ -47,20 +50,44 @@ export class MatchError extends Error {
 
 const commentCache = new Map<number, Comment[]>()
 
-/** 清洗标题：去掉集数标记、【】等装饰，保留内部的分隔符 */
+/** 集数标记：第3话 / 第 12 集 / 第1~4话 / 全25话 / [1] / EP12 */
+const EPISODE_MARKERS: RegExp[] = [
+  // 区间写法要先处理，否则「第1~4话」只会被啃掉后半截
+  /第\s*[0-9]+(?:\.[0-9]+)?\s*[~～\-–—至到]\s*[0-9]+(?:\.[0-9]+)?\s*[集话話期回]/g,
+  /第\s*[0-9]+(?:\.[0-9]+)?\s*[集话話期回]/g,
+  /全\s*[0-9]+\s*[集话話期回]/g,
+  /\[\s*[0-9]+(?:\.[0-9]+)?\s*\]/g,
+  /\bEP?\.?\s*[0-9]+\b/gi,
+]
+
+/**
+ * 更新状态词。番剧列表页会把这些词塞进标题，
+ * 但弹弹play 的番名里不会有，留着就整串搜不到。
+ * 只收「一定不是作品名一部分」的写法 —— 像光秃秃的「完结」
+ * 有可能是「XX 完结篇」这种真标题，不敢动。
+ */
+const STATUS_WORDS =
+  /(?:每周|每週|周更|週更|周更新|更新至|更新到|连载中|連載中|已完结|已完結)/g
+
+/** 首尾要剥掉的标点与括号（成对出现的两边都剥） */
+const EDGE_PUNCT =
+  /[\s\-–—_:：、,，.。!！?？|~～【】［］\[\]（）()《》<>『』「」“”"'‘’]+/g
+
+/** 清洗标题：去掉集数标记、更新状态、首尾装饰，保留内部的分隔符 */
 export function cleanTitle(raw: string): string {
   let title = String(raw || '').trim()
 
-  // 去掉 「第3集」「[1]」「第 12 话」这类集数标记
-  title = title.replace(
-    /(?:^|[\s【\[（(])(?:第\s*[0-9]+(?:\.[0-9]+)?\s*[集话話期回]|\[\s*[0-9]+(?:\.[0-9]+)?\s*\])/g,
-    ' '
-  )
+  for (const pattern of EPISODE_MARKERS) {
+    title = title.replace(pattern, ' ')
+  }
+  title = title.replace(STATUS_WORDS, ' ')
+
   // 去掉常见的站点后缀
   title = title.replace(/\s*[-_|]\s*(在线观看|線上看|免费观看|高清).*$/g, ' ')
-  // 去掉首尾标点与括号（【】是成对出现的，两边都要去）
-  title = title.replace(/^[\s\-–—_:：、,，.。!！?？|~～【】［］\[\]（）()《》<>]+/g, '')
-  title = title.replace(/[\s\-–—_:：、,，.。!！?？|~～【】［］\[\]（）()《》<>]+$/g, '')
+
+  // 首尾标点与括号
+  title = title.replace(new RegExp(`^${EDGE_PUNCT.source}`), '')
+  title = title.replace(new RegExp(`${EDGE_PUNCT.source}$`), '')
 
   return title.replace(/\s+/g, ' ').trim()
 }
@@ -68,7 +95,7 @@ export function cleanTitle(raw: string): string {
 /** 去掉所有分隔符与空格，处理全角半角差异 */
 export function squash(title: string): string {
   return String(title || '').replace(
-    /[\s\u3000\-–—_:：、,，.。!！?？|~～【】\[\]（）()《》<>・·'’"“”]+/g,
+    /[\s\u3000\-–—_:：、,，.。!！?？|~～【】\[\]（）()《》<>『』「」“”・·'’"’]+/g,
     ''
   )
 }
@@ -76,7 +103,7 @@ export function squash(title: string): string {
 /** 按分隔符切段 */
 function segments(title: string): string[] {
   return title
-    .split(/[\s\u3000\-–—_:：、,，.。!！?？|~～【】\[\]（）()《》<>・·]+/)
+    .split(/[\s\u3000\-–—_:：、,，.。!！?？|~～【】\[\]（）()《》<>『』「」“”・·]+/)
     .map((s) => s.trim())
     .filter(Boolean)
 }
@@ -96,6 +123,12 @@ function half(text: string, which: 'head' | 'tail'): string {
  *   ④ 该片段前半                  → 差异在尾部时命中
  *   ⑤ 第一个片段（通常是主标题）    → 库里只收了主标题时命中
  *   ⑥ 该片段后半                  → 差异在头部时命中
+ *   ⑦ 该片段的滑窗                → 译名中间被加了词，整串搜不到时兜底
+ *
+ * ⑦ 是最后手段：页面标题常常在译名里多塞「身为」「迷情」这类词，
+ * 于是整串必然不是库名的子串，只有退化成一段仍然连续的子串才搜得到。
+ * 窗口长度取最长片段的一半，位置按剩余请求预算均匀取样，避免把预算
+ * 全花在开头几个字上。
  */
 export function buildKeywords(rawTitle: string): string[] {
   const title = cleanTitle(rawTitle)
@@ -116,15 +149,37 @@ export function buildKeywords(rawTitle: string): string[] {
 
   const seen = new Set<string>()
   const out: string[] = []
-  for (const raw of candidates) {
+  const push = (raw: string | undefined) => {
     const text = (raw || '').trim()
-    if (text.length < MIN_KEYWORD_LEN) continue
+    if (text.length < MIN_KEYWORD_LEN) return
     const key = squash(text)
-    if (!key || seen.has(key)) continue
+    if (!key || seen.has(key)) return
     seen.add(key)
     out.push(text)
-    if (out.length >= MAX_KEYWORD_TRIES) break
   }
+
+  for (const raw of candidates) {
+    if (out.length >= MAX_KEYWORD_TRIES) break
+    push(raw)
+  }
+
+  if (longest && out.length < MAX_KEYWORD_TRIES) {
+    const budget = MAX_KEYWORD_TRIES - out.length
+    const length = Math.max(
+      WINDOW_MIN_LEN,
+      Math.min(WINDOW_MAX_LEN, Math.floor(longest.length / 2))
+    )
+    const total = longest.length - length + 1
+    if (total > 0) {
+      // 预算不够覆盖每个位置时均匀跳着取样，而不是只取开头
+      const stride = Math.max(1, Math.ceil(total / budget))
+      for (let offset = 0; offset < total; offset += stride) {
+        if (out.length >= MAX_KEYWORD_TRIES) break
+        push(longest.slice(offset, offset + length))
+      }
+    }
+  }
+
   return out
 }
 
@@ -202,6 +257,7 @@ export async function findAnime(
     throw new MatchError('没有可用的番剧名', { tried: [] })
   }
 
+  const title = cleanTitle(rawTitle)
   const tried: string[] = []
   for (const keyword of keywords) {
     tried.push(keyword)
@@ -218,12 +274,20 @@ export async function findAnime(
     )
     if (relevant.length) {
       log?.(`「${keyword}」命中 ${relevant.length} 条`)
-      return { animes: relevant, keyword, tried }
+      // 弹弹play 按 bangumiId 升序返回，跟相关度无关；
+      // 这里按「跟清洗后的页面标题的公共子串长度」重排，
+      // 让最像的那条排在候选列表第一个。
+      const ranked = [...relevant].sort(
+        (a, b) =>
+          longestCommonSubstring(title, b.name) -
+          longestCommonSubstring(title, a.name)
+      )
+      return { animes: ranked, keyword, tried }
     }
     log?.(`「${keyword}」${list.length} 条结果都不相关`)
   }
 
-  throw new MatchError(`弹弹play 未找到「${cleanTitle(rawTitle)}」`, { tried })
+  throw new MatchError(`弹弹play 未找到「${title}」`, { tried })
 }
 
 /** 从候选里挑最可能的番剧；只有高置信才自动选中 */
