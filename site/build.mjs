@@ -351,6 +351,32 @@ function changelogPage() {
   })
 }
 
+// ── 404 ────────────────────────────────────────────────
+// Workers 的 not_found_handling = "404-page" 要求 dist/404.html 存在，
+// 否则线上会返回 200 + 空 body，看着像站点坏了。
+function notFoundPage() {
+  const body = `
+<main>
+  <div class="wrap">
+    <div class="page-head">
+      <h1>404 · 这个页面不存在</h1>
+      <p>链接可能写错了，或者那一页还没做。回首页看看，或者去更新日志翻翻。</p>
+    </div>
+    <div class="actions">
+      <a class="btn btn--primary" href="./index.html">回首页</a>
+      <a class="btn btn--ghost" href="./changelog.html">看更新日志</a>
+    </div>
+  </div>
+</main>
+`
+  return layout({
+    title: `页面不存在 · ${SITE.name}`,
+    description: `${SITE.name}：页面不存在。`,
+    page: '404',
+    body,
+  })
+}
+
 // ── 构建主流程：先校验，后写盘 ────────────────────────────
 async function main() {
   const css = await readFile(join(SRC, 'style.css'), 'utf8')
@@ -359,6 +385,7 @@ async function main() {
   const pages = {
     'index.html': homePage(),
     'changelog.html': changelogPage(),
+    '404.html': notFoundPage(),
   }
 
   const problems = []
@@ -438,8 +465,8 @@ async function main() {
   if (existsSync(DIST)) await rm(DIST, { recursive: true, force: true })
   await mkdir(DIST, { recursive: true })
 
-  for (const [name, html] of Object.entries(pages)) {
-    await writeFile(join(DIST, name), html.replace('__STYLE__', () => css), 'utf8')
+  for (const [name, html] of Object.entries(rendered)) {
+    await writeFile(join(DIST, name), html, 'utf8')
   }
 
   // 脚本本体如果有就一起带上，让下载链接指向同域

@@ -1,2 +1,22 @@
+# 行尾统一成 LF。
+#
+# 这些模板文件的内容会被原样内联进打包产物（html.template.html 之类），
+# 如果 Windows 检出成 CRLF、CI 检出成 LF，本地和 CI 构建出来的
+# index.user.js 字节数就会不一样（差在字符串里的 \r），对不上很难查。
+# 统一 LF 之后两边产物逐字节一致。
+* text=auto eol=lf
+
+# 二进制文件不要动
+*.png binary
+*.jpg binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
 # shell 脚本必须 LF，否则 Linux CI 里 bash 会报 bad interpreter
 *.sh text eol=lf
+
+# Windows 批处理反而必须 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
