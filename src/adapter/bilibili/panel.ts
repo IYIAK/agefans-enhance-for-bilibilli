@@ -189,7 +189,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   // 这里原来有「重新匹配」「换番剧」两个按钮，语义和下面这排搜索完全重叠：
   // 点候选就是重新匹配，输入框里打字再按搜索就是换番剧。按钮只会让人猜
   // 它们和搜索的区别，所以去掉，只留搜索这一条路。
-  const ddpTitle = el('div', `${ROOT_CLASS}__section`, '弹弹play 匹配')
+  const ddpTitle = el('div', `${ROOT_CLASS}__section`, '弹弹play匹配')
 
   const searchRow = el('div', `${ROOT_CLASS}__row ${ROOT_CLASS}__row--input`)
   const searchInput = el('input', `${ROOT_CLASS}__input`) as HTMLInputElement
@@ -210,7 +210,11 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     'div',
     `${ROOT_CLASS}__section ${ROOT_CLASS}__section--row`
   )
-  filterTitle.append(el('span', undefined, '过滤器'))
+  const filterFold = el('button', `${ROOT_CLASS}__icon-text`, '展开')
+  filterFold.type = 'button'
+  filterFold.title = '折叠/展开过滤设置'
+  const filterLabel = el('span', undefined, '过滤器')
+  filterTitle.append(filterLabel, filterFold)
   const filterToggle = el(
     'button',
     `${ROOT_CLASS}__icon-text`,
@@ -277,6 +281,15 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     '改完对之后加载的分段生效，点「重新加载」可以立刻重来一遍'
   )
 
+  // 过滤器默认收起：它是最少改的一块，展开后要把面板撑得很长
+  const filterBody = el('div', `${ROOT_CLASS}__fold`)
+  filterBody.append(keywordBox, modeRow, mergeRow, densityRow, filterTip)
+  filterBody.hidden = true
+  filterFold.addEventListener('click', () => {
+    filterBody.hidden = !filterBody.hidden
+    filterFold.textContent = filterBody.hidden ? '展开' : '收起'
+  })
+
   function readFilterFromDom(): FilterConfig {
     const next: FilterConfig = {
       ...filterConfig,
@@ -340,11 +353,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     urlList,
     urlTip,
     filterTitle,
-    keywordBox,
-    modeRow,
-    mergeRow,
-    densityRow,
-    filterTip
+    filterBody
   )
   panel.append(header, body)
 
@@ -531,7 +540,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
     urlTip.classList.remove('is-error')
     urlTip.textContent = config.enabled
-      ? 'URL 来源和弹弹play 可以同时生效；时间对不上时填偏移（秒）'
+      ? 'URL 来源和弹弹play可以同时生效；时间对不上时填偏移（秒）'
       : '先打开上面的开关'
   }
 
@@ -794,7 +803,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
           tried = error.context.tried
           candidateList = error.context.animes.slice(0, 8)
           matchTip.textContent =
-            '弹弹play 搜索是纯子串匹配、最多 25 条且不翻页。可以直接用下面的搜索框改词重试。'
+            '弹弹play搜索是纯子串匹配、最多 25 条且不翻页。可以直接用下面的搜索框改词重试。'
         }
         render()
       }
@@ -860,6 +869,10 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     if (!current) return
     busy = true
     notice = `加载「${ep.name}」弹幕…`
+    // 先把选集结果记下来：下拉框要立刻显示这一集，用户才看得出自动选了哪集、
+    // 也才改得回去。之前这行在「没有弹幕」的 return 之后，于是那一集永远显示
+    // 成「选择集数…」，看起来像没选。
+    episode = ep
     render()
 
     try {
@@ -867,10 +880,10 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       if (!comments.length) {
         busy = false
         notice = `「${current.name}」${ep.name} 没有弹幕`
+        setComments([])
         render()
         return
       }
-      episode = ep
       // 保留 episodeOptions：用户选错了要能再改回来
       notice = ''
       busy = false
@@ -908,7 +921,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       if (!found.length) {
         notice = '没有结果'
         matchTip.textContent =
-          '弹弹play 最多只回 25 条、按 id 升序且不翻页，短词可能搜不到，试试更长的子串。'
+          '弹弹play最多只回 25 条、按 id 升序且不翻页，短词可能搜不到，试试更长的子串。'
         render()
         return
       }

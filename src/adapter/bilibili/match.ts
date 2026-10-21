@@ -73,7 +73,40 @@ const STATUS_WORDS =
 const EDGE_PUNCT =
   /[\s\-–—_:：、,，.。!！?？|~～【】［］\[\]（）()《》<>『』「」“”"'‘’]+/g
 
-/** 清洗标题：去掉集数标记、更新状态、首尾装饰，保留内部的分隔符 */
+/** 成对的括号：页面标题里经常只有一半，另一半被集数标记啃掉了 */
+const BRACKET_PAIRS: [string, string][] = [
+  ['【', '】'],
+  ['［', '］'],
+  ['[', ']'],
+  ['（', '）'],
+  ['(', ')'],
+  ['《', '》'],
+  ['<', '>'],
+  ['『', '』'],
+  ['「', '」'],
+]
+
+/**
+ * 删掉落单的括号。
+ *
+ * 页面标题常写成 `『佐佐木与文鸟小哔 第二季』第3话`：集数标记「第3话」在
+ * 末尾，先被删掉之后，`』` 就孤零零地留在字符串中间，只剥首尾是不管用的。
+ * 于是清洗结果里带着一个 `』`，整串搜不到，只能靠后面的短候选兜底。
+ * 这里把每种成对括号数量对不上的一方全部删掉。
+ */
+function dropLoneBrackets(text: string): string {
+  let out = text
+  for (const [ open, close ] of BRACKET_PAIRS) {
+    const left = out.split(open).length - 1
+    const right = out.split(close).length - 1
+    if (left === right) continue
+    if (left > right) out = out.split(open).join(' ')
+    else out = out.split(close).join(' ')
+  }
+  return out
+}
+
+/** 清洗标题：去掉集数标记、更新状态、落单括号与首尾装饰，保留内部分隔符 */
 export function cleanTitle(raw: string): string {
   let title = String(raw || '').trim()
 
@@ -85,7 +118,14 @@ export function cleanTitle(raw: string): string {
   // 去掉常见的站点后缀
   title = title.replace(/\s*[-_|]\s*(在线观看|線上看|免费观看|高清).*$/g, ' ')
 
+  // 集数标记删掉之后括号常常只剩下一边，先清掉再剥首尾
+  title = dropLoneBrackets(title)
+
   // 首尾标点与括号
+  title = title.replace(new RegExp(`^${EDGE_PUNCT.source}`), '')
+  title = title.replace(new RegExp(`${EDGE_PUNCT.source}$`), '')
+  // 剥一轮之后可能又露出新的，再来一次
+  title = dropLoneBrackets(title)
   title = title.replace(new RegExp(`^${EDGE_PUNCT.source}`), '')
   title = title.replace(new RegExp(`${EDGE_PUNCT.source}$`), '')
 

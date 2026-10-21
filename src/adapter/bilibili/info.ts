@@ -126,7 +126,9 @@ function readDomInfo(): BiliPageInfo {
     seriesName = String(title.split(/[-_|]/)[0] || '').trim()
   }
 
-  const episodeMatch = title.match(/第\s*([0-9]+(?:\.[0-9]+)?)\s*[集话期]/)
+  // 集数单位要跟 match.ts 的 EPISODE_MARKERS 对齐，繁体「話」和「回」也算：
+  // 港台番剧页标题常写「第3話」，只认简体就会漏。
+  const episodeMatch = title.match(/第\s*([0-9]+(?:\.[0-9]+)?)\s*[集话話期回]/)
   const episode = episodeMatch ? episodeMatch[1] : ''
 
   return {
