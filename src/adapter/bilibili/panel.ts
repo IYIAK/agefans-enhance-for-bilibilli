@@ -64,12 +64,14 @@ function runningVersion(): string {
   }
 }
 
-/** 控制条右侧的按钮容器（不同版本结构不一样，挨个试） */
+/**
+ * 控制条右侧的按钮容器。这里只认「容器」，不能再往里塞单按钮选择器当兜底——
+ * 兜底会命中控制条左边的某个按钮，图标就一会在左一会在右。
+ */
 const CONTROL_BAR_SELECTORS = [
   '.bpx-player-control-bottom-right',
-  '.bilibili-player-video-btn-widescreen',
-  '.bpx-player-ctrl-btn[aria-label]',
-  '.bilibili-player-video-btn',
+  '.bilibili-player-video-control-bottom-right',
+  '.bilibili-player-video-control .bilibili-player-video-btn-widescreen',
 ]
 
 /** 播放器根节点，用来给面板定位 */
@@ -364,14 +366,24 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   let anchorRetry = 0
   let anchorTimer: number | undefined
   let detached = false
+  let anchorEl: HTMLElement | null = null
 
+  /**
+   * 把按钮挂回控制条右侧。B 站切全屏/宽屏时会重建控制条，
+   * 原来的节点被丢掉，所以这事不能只做一次——挂丢了就重新挂。
+   */
   function placeButton() {
     if (detached) return
     const anchor = findOne(CONTROL_BAR_SELECTORS)
     if (anchor) {
-      anchor.append(button)
+      anchorEl = anchor as HTMLElement
+      if (button.parentElement !== anchorEl) {
+        anchorEl.append(button)
+        button.classList.remove('is-floating')
+      }
       return
     }
+    if (button.parentElement) return
     if (anchorRetry++ >= ANCHOR_RETRY) {
       button.classList.add('is-floating')
       document.body.append(button)
@@ -404,14 +416,29 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     return null
   }
 
-  function placePanel() {
+  /**
+   * 面板高度。只在打开、窗口尺寸变化、进出全屏时重算——
+   * 跟着页面滚动重算的话，播放器往上滚，可用空间变小，面板就被越压越矮。
+   * 滚动时宁可让面板有一部分跑到屏幕外，也不要缩。
+   */
+  let pinnedMaxHeight = 0
+
+  function placePanel(refit = false) {
+    // 位置和高度都只在打开、窗口尺寸变化时定一次。页面滚动时不重算——
+    // 滚动时播放器在动，跟着算就会既改位置又把高度越压越矮，
+    // 用户明确要求「滚动时保持原位置和高度，看不见就看不见」。
+    if (!refit && pinnedMaxHeight) return
+
     const bar = controlBarRect()
     const player = findOne(PLAYER_SELECTORS)
     if (!bar && !player) {
       panel.style.left = 'auto'
       panel.style.right = '16px'
       panel.style.bottom = '96px'
-      panel.style.maxHeight = '70vh'
+      if (refit || !pinnedMaxHeight) {
+        pinnedMaxHeight = Math.round(window.innerHeight * 0.7)
+      }
+      panel.style.maxHeight = `${pinnedMaxHeight}px`
       return
     }
 
@@ -426,16 +453,19 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     // 底线 = 控制条上沿再往上一丢丢，和原生设置浮层同一层
     const barTop = bar ? bar.top : (playerRect?.bottom ?? window.innerHeight)
     const bottom = Math.max(8, window.innerHeight - barTop + 10)
-    // 上限：面板不能顶到播放器外面去
-    const topLimit = playerRect ? playerRect.top + 8 : 8
-    const available = Math.max(160, barTop - topLimit - 10)
-    const maxHeight = Math.min(available, window.innerHeight - bottom - 12)
 
     panel.style.width = `${width}px`
     panel.style.left = `${Math.max(8, right - width - 8)}px`
     panel.style.right = 'auto'
     panel.style.bottom = `${bottom}px`
-    panel.style.maxHeight = `${Math.min(maxHeight, window.innerHeight * 0.72)}px`
+
+    if (refit || !pinnedMaxHeight) {
+      const room = playerRect && playerRect.height > 240
+        ? playerRect.height - 56
+        : window.innerHeight * 0.7
+      pinnedMaxHeight = Math.round(Math.max(220, Math.min(room, window.innerHeight * 0.86)))
+    }
+    panel.style.maxHeight = `${pinnedMaxHeight}px`
   }
 
   function open(next: boolean) {
@@ -443,7 +473,9 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     panel.hidden = !next
     button.classList.toggle('is-active', next)
     if (next) {
-      placePanel()
+      // 打开时重算一次高度；之后只有窗口尺寸变了才重算
+      placeButton()
+      placePanel(true)
       render()
     }
   }
@@ -475,7 +507,11 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   }
 
   function onResize() {
-    if (opened) placePanel()
+    if (!opened) return
+    // 窗口尺寸/全屏变了，可用空间才真的变了，这时候重算高度是对的
+    pinnedMaxHeight = 0
+    placeButton()
+    placePanel(true)
   }
 
   button.addEventListener('click', (e) => {
@@ -977,8 +1013,10 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     renderStatus()
   })
 
+  // 播放器切全屏/宽屏会重建控制条，按钮被丢掉就重新挂回去。
+  // 面板本身的位置不再跟着 DOM 变动走——那会让它在滚动时乱跳。
   const onBodyMutation = new MutationObserver(() => {
-    if (opened) placePanel()
+    placeButton()
   })
   onBodyMutation.observe(document.body, { childList: true, subtree: true })
 
