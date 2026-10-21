@@ -44,6 +44,11 @@ jobs:
       - name: Install
         run: pnpm install --node-linker=hoisted --ignore-scripts
 
+      # 先查大小写：Windows 上 tsc 发现不了 'KPlayer' 与 'Kplayer.ts' 这种错，
+      # 到 Linux 才炸，而且报的是次生错误，很难倒推。放 typecheck 之前。
+      - name: Check filename casing
+        run: node scripts/check-case.mjs
+
       - name: Typecheck
         run: node node_modules/typescript/bin/tsc --noEmit
 

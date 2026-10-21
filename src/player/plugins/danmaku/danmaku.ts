@@ -33,7 +33,7 @@ interface DanmakuConfig {
   danmakuFilter: string[]
   danmakuScrollAreaPercent: number
 }
-declare module '../../KPlayer' {
+declare module '../../Kplayer' {
   interface LocalConfig extends DanmakuConfig {}
 
   interface KPlayer {

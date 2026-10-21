@@ -5,7 +5,7 @@ import { Shortcuts } from '../shortcuts'
 import T from './html.template.html'
 import { local } from '../../../utils/storage'
 
-declare module '../../KPlayer' {
+declare module '../../Kplayer' {
   interface KPlayer {
     autoSeek: AutoSeek
   }

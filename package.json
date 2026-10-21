@@ -24,6 +24,7 @@
     "dev": "bocchi dev",
     "build": "bocchi build",
     "lint": "tsc --noEmit",
+    "check:case": "node scripts/check-case.mjs",
     "prepare": "husky",
     "deploy": "gh-pages -d dist",
     "preversion": "pnpm run lint",

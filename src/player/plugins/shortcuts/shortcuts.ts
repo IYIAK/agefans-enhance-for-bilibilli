@@ -4,7 +4,7 @@ import { KeyBindings } from './keybindings'
 import { Command, Commands } from './types'
 import { normalizeKeyEvent } from './utils'
 
-declare module '../../KPlayer' {
+declare module '../../Kplayer' {
   interface KPlayer {
     shortcuts: Shortcuts
   }
