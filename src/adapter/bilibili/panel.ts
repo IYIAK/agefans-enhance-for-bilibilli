@@ -65,9 +65,17 @@ function runningVersion(): string {
 }
 
 /**
- * 控制条右侧的按钮容器。这里只认「容器」，不能再往里塞单按钮选择器当兜底——
- * 兜底会命中控制条左边的某个按钮，图标就一会在左一会在右。
+ * 优先插到「清晰度」左边。这里只认清晰的单个节点，找不到再退回控制条右侧容器。
+ * 注意不能拿控制条里任意按钮当兜底——兜底会命中左边的音量之类，
+ * 图标就一会在左一会在右。
  */
+const ICON_BEFORE_SELECTORS = [
+  '.bpx-player-ctrl-quality',
+  '.bpx-player-ctrl-quality-result',
+  '.bpx-player-ctrl-btn[aria-label*="清晰度"]',
+  '.bilibili-player-video-btn-quality',
+]
+
 const CONTROL_BAR_SELECTORS = [
   '.bpx-player-control-bottom-right',
   '.bilibili-player-video-control-bottom-right',
@@ -369,11 +377,24 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   let anchorEl: HTMLElement | null = null
 
   /**
-   * 把按钮挂回控制条右侧。B 站切全屏/宽屏时会重建控制条，
-   * 原来的节点被丢掉，所以这事不能只做一次——挂丢了就重新挂。
+   * 把按钮挂回控制条。优先插在「清晰度」左边（用户指定），插不进去就退回
+   * 控制条右侧容器的末尾。B 站切全屏/宽屏时会重建控制条，原来的节点被丢掉，
+   * 所以这事不能只做一次——挂丢了就重新挂。
    */
   function placeButton() {
     if (detached) return
+
+    const before = findOne(ICON_BEFORE_SELECTORS)
+    if (before && before.parentElement) {
+      const target = before.parentElement
+      anchorEl = target as HTMLElement
+      if (button.parentElement !== target || button.nextElementSibling !== before) {
+        target.insertBefore(button, before)
+        button.classList.remove('is-floating')
+      }
+      return
+    }
+
     const anchor = findOne(CONTROL_BAR_SELECTORS)
     if (anchor) {
       anchorEl = anchor as HTMLElement

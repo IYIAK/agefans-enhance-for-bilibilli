@@ -3,14 +3,16 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    align-self: center;
     width: 26px;
     height: 26px;
-    margin: 0 6px;
+    margin: 0 4px;
     border-radius: 4px;
     color: #fff;
     cursor: pointer;
     opacity: 0.9;
-    vertical-align: middle;
+    // 图标本体上下留白不均匀，贴着基线看会偏下；整体抬 1px 才是视觉居中
+    transform: translateY(-1px);
     transition: background-color 0.15s;
 
     svg {
@@ -35,6 +37,7 @@
       height: 32px;
       border-radius: 50%;
       background: rgba(24, 25, 28, 0.9);
+      transform: none;
     }
   }
 
