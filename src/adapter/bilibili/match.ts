@@ -69,6 +69,22 @@ const EPISODE_MARKERS: RegExp[] = [
 const STATUS_WORDS =
   /(?:每周|每週|周更|週更|周更新|更新至|更新到|连载中|連載中|已完结|已完結)/g
 
+/**
+ * 画质/编码标签。B 站不少投稿会在标题前面堆这些东西：
+ * `4K超清 赛博朋克：边缘行者 第二季`。
+ *
+ * 它们本来无害（整串搜不到还能退到后面的短候选），但 `buildKeywords` 的
+ * 兜底逻辑是「取最长的片段」，而 `4K超清` 正好和真正的番名片段一样长，
+ * 排序还排在前面 —— 于是所有兜底候选都变成了画质标签，一次搜索全落空，
+ * 面板报「未找到」。(实测：`4K超清 赛博朋克：边缘行者 第二季` 只生成
+ * `['4K超清 赛博朋克：边缘行者 第二季', '4K超清']` 两个候选。)
+ */
+const TECH_TAGS =
+  /\b(?:4K|8K|1080P|720P|2160P|HDR|HEVC|AVC|BDRip|BluRay|WEB-?DL)\b/gi
+
+/** 中文画质词没有词边界，单独一遍 */
+const TECH_TAGS_CN = /(?:超清|蓝光(?:原盘)?|高清|极清|原画|杜比视界|60帧|120帧)/g
+
 /** 首尾要剥掉的标点与括号（成对出现的两边都剥） */
 const EDGE_PUNCT =
   /[\s\-–—_:：、,，.。!！?？|~～【】［］\[\]（）()《》<>『』「」“”"'‘’]+/g
@@ -85,6 +101,32 @@ const BRACKET_PAIRS: [string, string][] = [
   ['『', '』'],
   ['「', '」'],
 ]
+
+/**
+ * 丢掉纯画质标签的片段。
+ *
+ * 只在「整个片段都是画质词」时才丢：`4K超清`、`1080P`、`BLURAY` 整段消失，
+ * 但 `高清战队`、`4K之恋` 这种带着画质词的真正番名会原样保留——
+ * 宁可漏清也不能把番名本身啃掉。片段之间有分隔符的（空格、点、竖线）才算，
+ * 所以 `赛博朋克：边缘行者` 不会被拆开。
+ */
+function dropTechTags(title: string): string {
+  const parts = title.split(/([\s\u3000|·、]+)/)
+  let touched = false
+  const kept = parts.map((part) => {
+    if (!part.trim()) return part
+    const stripped = part
+      .replace(TECH_TAGS, ' ')
+      .replace(TECH_TAGS_CN, ' ')
+      .trim()
+    if (!stripped) {
+      touched = true
+      return ' '
+    }
+    return part
+  })
+  return touched ? kept.join(' ') : title
+}
 
 /**
  * 删掉落单的括号。
@@ -115,6 +157,9 @@ export function cleanTitle(raw: string): string {
   }
   title = title.replace(STATUS_WORDS, ' ')
 
+  // 画质/编码标签：整段都是画质词的片段直接丢掉
+  title = dropTechTags(title)
+
   // 去掉常见的站点后缀
   title = title.replace(/\s*[-_|]\s*(在线观看|線上看|免费观看|高清).*$/g, ' ')
 
@@ -126,6 +171,13 @@ export function cleanTitle(raw: string): string {
   title = title.replace(new RegExp(`${EDGE_PUNCT.source}$`), '')
   // 剥一轮之后可能又露出新的，再来一次
   title = dropLoneBrackets(title)
+  title = title.replace(new RegExp(`^${EDGE_PUNCT.source}`), '')
+  title = title.replace(new RegExp(`${EDGE_PUNCT.source}$`), '')
+
+  // `【4K】番名` 这种：画质标签被括号包着，第一次 dropTechTags 时整个片段
+  // 不是纯画质词所以留了下来；等 EDGE_PUNCT 把 `【】` 剥掉，`4K` 就单独成了
+  // 一个片段，这时候才认得出来。
+  title = dropTechTags(title)
   title = title.replace(new RegExp(`^${EDGE_PUNCT.source}`), '')
   title = title.replace(new RegExp(`${EDGE_PUNCT.source}$`), '')
 
@@ -153,6 +205,47 @@ function half(text: string, which: 'head' | 'tail'): string {
   return which === 'head' ? text.slice(0, middle) : text.slice(middle)
 }
 
+/** 纯季数、纯集数、纯画质这种片段当关键词毫无意义，选 longest/first 时要跳过 */
+function isNoiseSegment(text: string): boolean {
+  const key = squash(text)
+  if (!key) return true
+  // 「第二季」「第3期」「第4部」
+  if (/^第?[0-9一二两三四五六七八九十]+[季期部]$/.test(key)) return true
+  // 裸数字：「2」「12」
+  if (/^[0-9]{1,3}$/.test(key)) return true
+  // 整段就是集数标记：「第3话」「全25话」「EP12」
+  if (
+    EPISODE_MARKERS.some((re) =>
+      new RegExp(`^(?:${re.source})$`, re.flags).test(text.trim())
+    )
+  ) {
+    return true
+  }
+  // 整段都是画质/编码标签
+  if (dropTechTags(text).trim() === '') return true
+  return false
+}
+
+/**
+ * 把「第二季」改写成库里常见的尾数字写法。
+ *
+ * 弹弹play 里续作命名很不统一：有的写「第二季」，有的只写一个「2」。
+ * 页面标题几乎总是带「第二季」，而库里那条可能是「赛博朋克：边缘行者 2」，
+ * 于是整串搜不到、退化成「赛博朋克」又只剩几个对不上季数的候选。
+ * 这里补一个把「第N季/期/部」换成尾数字的候选，专门对付这种写法差异。
+ */
+function seasonDigitVariant(title: string): string {
+  const marked = /第\s*([0-9]+|[零一二两三四五六七八九十]+)\s*[季期部]/.exec(title)
+  if (!marked) return ''
+  const season = parseCount(marked[1])
+  if (season === undefined) return ''
+  const head = title.slice(0, marked.index).trim()
+  const tail = title.slice(marked.index + marked[0].length).trim()
+  if (!head) return ''
+  const joined = [head, tail].filter(Boolean).join(' ')
+  return `${joined} ${season}`
+}
+
 /**
  * 生成候选关键词。顺序即尝试顺序，前面的更可能是精确命中。
  *
@@ -175,8 +268,12 @@ export function buildKeywords(rawTitle: string): string[] {
   if (!title) return []
 
   const all = segments(title)
-  const longest = [...all].sort((a, b) => b.length - a.length)[0]
-  const first = all[0]
+  // 切出来的片段可能是「第二季」「4K超清」「第3话」这种，拿它当关键词
+  // 只会搜回一堆无关条目，还可能把真正的番名挤出候选表，先剔掉。
+  const meaningful = all.filter((seg) => !isNoiseSegment(seg))
+  const pool = meaningful.length ? meaningful : all
+  const longest = [...pool].sort((a, b) => b.length - a.length)[0]
+  const first = pool[0]
 
   const candidates = [
     title,
@@ -185,6 +282,7 @@ export function buildKeywords(rawTitle: string): string[] {
     longest && longest.length >= 6 ? half(longest, 'head') : '',
     first,
     longest && longest.length >= 6 ? half(longest, 'tail') : '',
+    seasonDigitVariant(title),
   ]
 
   const seen = new Set<string>()
@@ -296,6 +394,12 @@ export function seasonOf(title: string): number | undefined {
 
   const english = /\b(?:season|s)\s*([0-9]{1,2})\b/i.exec(title)
   if (english) return Number(english[1])
+
+  // 弹弹play 里不少续作只写一个结尾数字，不带「季」字：
+  // 「赛博朋克：边缘行者 2」。只认 2~9 的单个数字（第一季通常不写数字），
+  // 且必须由分隔符或标点隔开，避免把「赛博朋克 2077」「高达 00」当季数。
+  const trailing = /(?:^|[\s\u3000：:·・、,，\-–—_~～])([2-9])$/.exec(title)
+  if (trailing) return Number(trailing[1])
 
   return undefined
 }

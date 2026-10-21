@@ -224,7 +224,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   filterFold.type = 'button'
   filterFold.title = '折叠/展开过滤设置'
   const filterLabel = el('span', undefined, '过滤器')
-  filterTitle.append(filterLabel, filterFold)
+  filterTitle.append(filterLabel)
   const filterToggle = el(
     'button',
     `${ROOT_CLASS}__icon-text`,
@@ -232,10 +232,14 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   )
   filterToggle.type = 'button'
   filterToggle.title = '过滤对原生与第三方弹幕一起生效'
-  const filterReload = el('button', `${ROOT_CLASS}__icon-text`, '重新加载')
+  // 这个按钮的作用是「让已经缓冲好的分段用新规则重来一遍」，不是保存
+  // （改动本身在 change 时就存了）。所以文案直接写它的效果。
+  const filterReload = el('button', `${ROOT_CLASS}__icon-text`, '立即生效')
   filterReload.type = 'button'
-  filterReload.title = '让播放器重新请求当前分段，新设置立刻生效'
-  filterTitle.append(filterToggle, filterReload)
+  filterReload.title = '让播放器重新请求当前分段，过滤改动立刻应用到已经加载的弹幕'
+  // 折叠按钮放最右：它管的是整块内容的显示，和「已启用」「立即生效」
+  // 这两个作用在弹幕上的开关不是一类，夹在中间会让人以为它也改配置。
+  filterTitle.append(filterToggle, filterReload, filterFold)
 
   const keywordBox = el('textarea', `${ROOT_CLASS}__textarea`)
   keywordBox.rows = 3
@@ -288,7 +292,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   const filterTip = el(
     'div',
     `${ROOT_CLASS}__tip`,
-    '改完对之后加载的分段生效，点「重新加载」可以立刻重来一遍'
+    '改完只影响之后加载的分段；点「立即生效」可以让已经加载的弹幕也重新过一遍'
   )
 
   // 过滤器默认收起：它是最少改的一块，展开后要把面板撑得很长
@@ -326,7 +330,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   function onFilterChange() {
     filterConfig = readFilterFromDom()
     saveFilter(filterConfig)
-    filterTip.textContent = '已保存；点「重新加载」对已加载的分段也生效'
+    filterTip.textContent = '已保存；点「立即生效」可以让已经加载的弹幕也重新过一遍'
     render()
   }
 
@@ -438,17 +442,17 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   }
 
   /**
-   * 面板高度。只在打开、窗口尺寸变化、进出全屏时重算——
-   * 跟着页面滚动重算的话，播放器往上滚，可用空间变小，面板就被越压越矮。
-   * 滚动时宁可让面板有一部分跑到屏幕外，也不要缩。
+   * 面板高度。只在打开、窗口尺寸变化、进出全屏时重算。
+   *
+   * 位置跟着滚动走（用户要求「面板要跟着页面滚动」），但高度钉住不动——
+   * 滚动时播放器在动，跟着重算高度就会把面板越压越矮，那是上一版的毛病。
    */
   let pinnedMaxHeight = 0
 
   function placePanel(refit = false) {
-    // 位置和高度都只在打开、窗口尺寸变化时定一次。页面滚动时不重算——
-    // 滚动时播放器在动，跟着算就会既改位置又把高度越压越矮，
-    // 用户明确要求「滚动时保持原位置和高度，看不见就看不见」。
-    if (!refit && pinnedMaxHeight) return
+    // 位置每次都算：面板是 position:fixed，不跟着滚动重算就会脱离播放器
+    // 停在原地。高度只有在 refit 时才重算，避免越滚越矮。
+    const recalcHeight = refit || !pinnedMaxHeight
 
     const bar = controlBarRect()
     const player = findOne(PLAYER_SELECTORS)
@@ -456,7 +460,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       panel.style.left = 'auto'
       panel.style.right = '16px'
       panel.style.bottom = '96px'
-      if (refit || !pinnedMaxHeight) {
+      if (recalcHeight) {
         pinnedMaxHeight = Math.round(window.innerHeight * 0.7)
       }
       panel.style.maxHeight = `${pinnedMaxHeight}px`
@@ -480,11 +484,14 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     panel.style.right = 'auto'
     panel.style.bottom = `${bottom}px`
 
-    if (refit || !pinnedMaxHeight) {
-      const room = playerRect && playerRect.height > 240
-        ? playerRect.height - 56
-        : window.innerHeight * 0.7
-      pinnedMaxHeight = Math.round(Math.max(220, Math.min(room, window.innerHeight * 0.86)))
+    if (recalcHeight) {
+      const room =
+        playerRect && playerRect.height > 240
+          ? playerRect.height - 56
+          : window.innerHeight * 0.7
+      pinnedMaxHeight = Math.round(
+        Math.max(220, Math.min(room, window.innerHeight * 0.86))
+      )
     }
     panel.style.maxHeight = `${pinnedMaxHeight}px`
   }
@@ -535,6 +542,21 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     placePanel(true)
   }
 
+  /**
+   * 面板是 position:fixed，不重算就会在页面滚动后脱离播放器停在原地。
+   * 这里只重算位置、不动高度（高度跟着重算会越滚越矮，那是上一版的毛病）。
+   * 用捕获阶段监听，播放器内部滚动容器的滚动也能收到；再用 rAF 合并成每帧一次。
+   */
+  let scrollRaf = 0
+
+  function onScroll() {
+    if (!opened || scrollRaf) return
+    scrollRaf = window.requestAnimationFrame(() => {
+      scrollRaf = 0
+      if (opened) placePanel(false)
+    })
+  }
+
   button.addEventListener('click', (e) => {
     e.stopPropagation()
     open(!opened)
@@ -546,6 +568,9 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   document.addEventListener('mousedown', onDocumentMouseDown, true)
   document.addEventListener('click', onDocumentClick, true)
   window.addEventListener('resize', onResize)
+  // scroll 不冒泡，只能在捕获阶段拿到；这样播放器内部那几个滚动容器
+  // （宽屏模式的推荐列表、番剧选集区）滚动时也能跟着重算
+  window.addEventListener('scroll', onScroll, true)
 
   // ── 开关 ────────────────────────────────────────────────
   switchInput.addEventListener('change', () => {
@@ -1062,6 +1087,8 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       document.removeEventListener('click', onDocumentClick, true)
       document.removeEventListener('mousedown', onDocumentMouseDown, true)
       window.removeEventListener('resize', onResize)
+      window.removeEventListener('scroll', onScroll, true)
+      if (scrollRaf) window.cancelAnimationFrame(scrollRaf)
       onBodyMutation.disconnect()
       unsubscribe()
       button.remove()
