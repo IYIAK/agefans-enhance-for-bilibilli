@@ -5,12 +5,14 @@
     justify-content: center;
     // 不要写 align-self：B 站控制条自己用一套对齐把按钮排在一条线上，
     // 我们单独指定 center 反而会被顶得比邻居高一截/低一截，看着就是没对齐。
-    // 也不要用 transform 去补——补了 1px 反而更歪。让父级的对齐规则生效就好。
     width: 26px;
     height: 26px;
     margin-right: 10px;
     // inline-flex 默认按基线排，把行高归零才不会跟着文字基线往下沉
     line-height: 0;
+    // 控制条是按基线对齐的，图标没有文字，光靠 line-height 还差一点，
+    // 往上抬 1px 才能和左右邻居的视觉中线对上。
+    transform: translateY(-1px);
     border-radius: 4px;
     color: #fff;
     cursor: pointer;

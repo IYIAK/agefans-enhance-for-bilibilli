@@ -226,24 +226,63 @@ function isNoiseSegment(text: string): boolean {
   return false
 }
 
-/**
- * 把「第二季」改写成库里常见的尾数字写法。
- *
- * 弹弹play 里续作命名很不统一：有的写「第二季」，有的只写一个「2」。
- * 页面标题几乎总是带「第二季」，而库里那条可能是「赛博朋克：边缘行者 2」，
- * 于是整串搜不到、退化成「赛博朋克」又只剩几个对不上季数的候选。
- * 这里补一个把「第N季/期/部」换成尾数字的候选，专门对付这种写法差异。
- */
-function seasonDigitVariant(title: string): string {
+/** 2~10 的罗马数字。番剧续作里 II、III 很常见，而且往往就写在大标题后面 */
+const ROMAN: Record<number, string> = {
+  2: 'II',
+  3: 'III',
+  4: 'IV',
+  5: 'V',
+  6: 'VI',
+  7: 'VII',
+  8: 'VIII',
+  9: 'IX',
+  10: 'X',
+}
+
+// ES2018 没有 Object.fromEntries，这里手动建表
+const ROMAN_TO_NUMBER: Record<string, number> = (() => {
+  const table: Record<string, number> = {}
+  for (const key of Object.keys(ROMAN)) {
+    table[ROMAN[Number(key)]] = Number(key)
+  }
+  return table
+})()
+
+/** 从「第几季」里取出季数，取不到返回 undefined */
+function seasonNumber(title: string): number | undefined {
   const marked = /第\s*([0-9]+|[零一二两三四五六七八九十]+)\s*[季期部]/.exec(title)
-  if (!marked) return ''
-  const season = parseCount(marked[1])
-  if (season === undefined) return ''
+  if (!marked) return undefined
+  return parseCount(marked[1])
+}
+
+/**
+ * 把「第二季」这一处改写成库里可能用的各种续作写法。
+ *
+ * 弹弹play 里续作命名很不统一，同一个「第二季」可能被写成：
+ *   赛博朋克：边缘行者 2
+ *   赛博朋克：边缘行者 II
+ *   赛博朋克：边缘行者 Season 2
+ *   赛博朋克：边缘行者 S2
+ * 页面标题几乎总是写「第二季」，于是整串必然搜不到，只能退化成
+ * 「赛博朋克」这种短片段，结果搜回一堆对不上季数的条目。
+ * 这里把这几种写法都造出来各试一次：它们只改季数后缀、番名一字不差，
+ * 属于精确候选，命中质量远高于短片段，所以排在退化手段之前。
+ */
+function seasonVariants(title: string): string[] {
+  const season = seasonNumber(title)
+  if (season === undefined) return []
+
+  const marked = /第\s*(?:[0-9]+|[零一二两三四五六七八九十]+)\s*[季期部]/.exec(title)
+  if (!marked) return []
   const head = title.slice(0, marked.index).trim()
   const tail = title.slice(marked.index + marked[0].length).trim()
-  if (!head) return ''
+  if (!head) return []
+
   const joined = [head, tail].filter(Boolean).join(' ')
-  return `${joined} ${season}`
+  const variants = [`${joined} ${season}`, `${joined} Season ${season}`, `${joined} S${season}`]
+  const roman = ROMAN[season]
+  if (roman) variants.splice(1, 0, `${joined} ${roman}`)
+  return variants
 }
 
 /**
@@ -277,13 +316,13 @@ export function buildKeywords(rawTitle: string): string[] {
 
   // 顺序就是「精确 → 退化」的优先级，因为 findAnime 是命中即停的：
   // 一旦某个短片段先命中，后面更精确的写法就没机会试了。
-  // 所以整串、去分隔符的整串、以及「第二季→尾数字 2」这种只改了季数后缀的
-  // 写法都排在前面——它们信息量最大，命中质量也最高；
-  // 切成片段、取半截、滑窗这些退化手段一律排后。
+  // 所以整串、去分隔符的整串、以及各种只改了季数后缀的写法
+  // （第二季 → 2 / II / Season 2 / S2）都排在前面——它们番名一字不差，
+  // 命中质量最高；切成片段、取半截、滑窗这些退化手段一律排后。
   const candidates = [
     title,
     squash(title),
-    seasonDigitVariant(title),
+    ...seasonVariants(title),
     longest,
     longest && longest.length >= 6 ? half(longest, 'head') : '',
     first,
@@ -399,6 +438,16 @@ export function seasonOf(title: string): number | undefined {
 
   const english = /\b(?:season|s)\s*([0-9]{1,2})\b/i.exec(title)
   if (english) return Number(english[1])
+
+  // 罗马数字结尾也是常见写法：「赛博朋克：边缘行者 II」。
+  // 同样要求它单独占结尾那一节，避免把标题里的字母当成季数。
+  const roman = /(?:^|[\s\u3000：:·・、,，\-–—_~～])(II|III|IV|V|VI|VII|VIII|IX|X)$/i.exec(
+    title
+  )
+  if (roman) {
+    const season = ROMAN_TO_NUMBER[roman[1].toUpperCase()]
+    if (season !== undefined) return season
+  }
 
   // 弹弹play 里不少续作只写一个结尾数字，不带「季」字：
   // 「赛博朋克：边缘行者 2」。只认 2~9 的单个数字（第一季通常不写数字），

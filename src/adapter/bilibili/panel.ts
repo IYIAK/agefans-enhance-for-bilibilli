@@ -181,7 +181,17 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     debugBox.hidden = !debugBox.hidden
     debugToggle.textContent = debugBox.hidden ? '详情' : '收起'
   })
-  status.append(statusMain, statusSub, debugToggle, debugBox)
+  // 播放器把每一段弹幕的 Promise 按段号存在自己的内存里（DanmakuStore.allSegment），
+  // 已经取过的那一段不会再请求第二次；bundle 里唯一能清这块缓存的 loadDmPbAll(reset)
+  // 是死代码，也没有对外句柄。所以「这一段在我打开开关/选好集之前就取走了」这种情况，
+  // 除了刷新页面没有别的补救办法。好在匹配结果按番名记着，刷新后第一段请求就能赶上。
+  const pageReloadBtn = el('button', `${ROOT_CLASS}__mini`, '刷新页面生效')
+  pageReloadBtn.type = 'button'
+  pageReloadBtn.hidden = true
+  pageReloadBtn.title = '播放器已经缓存了这一段弹幕，只有刷新页面才会重新请求'
+  pageReloadBtn.addEventListener('click', () => location.reload())
+
+  status.append(statusMain, statusSub, debugToggle, debugBox, pageReloadBtn)
 
   // URL 源
   const urlTitle = el('div', `${ROOT_CLASS}__section`, 'URL 弹幕源')
@@ -655,6 +665,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
   function renderStatus() {
     const stats = getStats()
+    pageReloadBtn.hidden = true
 
     if (!config.enabled) {
       statusMain.textContent = '未开启'
@@ -701,7 +712,10 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       } else if (stats.requests === 0) {
         statusSub.textContent = '等待播放器请求弹幕…'
       } else if (stats.armed === 0) {
-        statusSub.textContent = '本段在开关打开前已加载，刷新页面即可生效'
+        // 打开开关之前这一段就已经取走了，播放器把它缓存在内存里不会重发
+        statusSub.textContent =
+          '这一段在开关打开前就取走了，播放器不会重发，刷新页面即可生效'
+        pageReloadBtn.hidden = false
       } else if (stats.reads === 0) {
         statusSub.textContent = '已拦截请求，但还没有接管到响应'
       } else {
@@ -845,9 +859,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
     void forceReloadDanmaku().then((method) => {
       reloading = false
-      reloadHint = method
-        ? ''
-        : '弹幕已就绪，但没能触发重新请求（拖一下进度条或重开开关）'
+      reloadHint = method ? '' : '没能让播放器重新请求，刷新页面即可生效'
       if (method) {
         console.info('[danmaku-enhance] 已通过', method, '触发弹幕重新加载')
       }
