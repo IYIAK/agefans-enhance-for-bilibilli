@@ -1,0 +1,70 @@
+# 发版流水线：master 有提交就重新构建脚本本体，产物推到 gh-pages 分支。
+#
+# 为什么用 gh-pages 分支而不是官网域名：
+#   脚本的 @downloadURL / @updateURL 指向
+#   https://github.com/<owner>/<repo>/raw/gh-pages/index.user.js
+#   这样 GitHub 上只看得到代码和产物，域名与部署配置全部留在本地。
+#
+# 注意：这里不含任何域名或账号信息。官网部署请看 site/README.md，那一步在本地做。
+
+name: Release userscript
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# gh-pages 是同一个仓库的另一个分支，需要写权限。
+permissions:
+  contents: write
+
+# 连推多次只跑最后一次，避免两个 run 抢着推同一个分支。
+concurrency:
+  group: release-userscript
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # --node-linker=hoisted：pnpm 默认的符号链接布局下 bocchi 找不到 yargs，
+      #   且 TypeScript 7 的平台专属二进制解析不到。
+      # --ignore-scripts：跳过 husky 装 git hook，CI 里没有意义。
+      - name: Install
+        run: pnpm install --node-linker=hoisted --ignore-scripts
+
+      - name: Typecheck
+        run: node node_modules/typescript/bin/tsc --noEmit
+
+      - name: Build
+        run: node node_modules/bocchi/dist/cli.mjs build
+
+      - name: Verify output
+        run: bash .github/scripts/verify-release.sh
+
+      - name: Publish to gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          version=$(node -p "require('./package.json').version")
+          cd dist
+          git init -q -b gh-pages
+          git add -A
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -q -m "deploy: v${version} ($(date -u +%FT%TZ))"
+          git push -f \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            gh-pages

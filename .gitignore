@@ -107,6 +107,9 @@ dist
 
 *.dev.js
 
+# 私有部署域名清单：只留本地，仓库只同步代码
+.github/scripts/private-hosts.txt
+
 # Playwright
 /test-results/
 /playwright-report/
