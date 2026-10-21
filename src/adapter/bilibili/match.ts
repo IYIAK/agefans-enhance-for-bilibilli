@@ -149,19 +149,23 @@ export function buildKeywords(rawTitle: string): string[] {
 
   const seen = new Set<string>()
   const out: string[] = []
-  const push = (raw: string | undefined) => {
+  const push = (raw: string | undefined, minLength = MIN_KEYWORD_LEN) => {
     const text = (raw || '').trim()
-    if (text.length < MIN_KEYWORD_LEN) return
+    if (text.length < minLength) return
     const key = squash(text)
     if (!key || seen.has(key)) return
     seen.add(key)
     out.push(text)
   }
 
-  for (const raw of candidates) {
-    if (out.length >= MAX_KEYWORD_TRIES) break
-    push(raw)
-  }
+  candidates.forEach((raw, index) => {
+    if (out.length >= MAX_KEYWORD_TRIES) return
+    // 第 0 个就是清洗后的番名本身，哪怕只有两个字也得试。
+    // 弹弹play 的搜索下限是两个字符，而《冰菓》《虫师》这类两字番名
+    // 派生出任何候选都还是它自己，卡在 3 字会被整条丢光，
+    // 于是 findAnime 直接报「没有可用的番剧名」，一次请求都不发。
+    push(raw, index === 0 ? 2 : MIN_KEYWORD_LEN)
+  })
 
   if (longest && out.length < MAX_KEYWORD_TRIES) {
     const budget = MAX_KEYWORD_TRIES - out.length
@@ -206,6 +210,54 @@ export function longestCommonSubstring(a: string, b: string): number {
 
 export function normalizeName(name: string) {
   return squash(name).toLowerCase()
+}
+
+const CN_DIGITS: Record<string, number> = {
+  零: 0,
+  一: 1,
+  二: 2,
+  两: 2,
+  三: 3,
+  四: 4,
+  五: 5,
+  六: 6,
+  七: 7,
+  八: 8,
+  九: 9,
+}
+
+/** 解析「十二」「二十」「三」这类中文数字，纯数字原样返回 */
+function parseCount(text: string): number | undefined {
+  if (/^\d+$/.test(text)) return Number(text)
+
+  const tensAt = text.indexOf('十')
+  if (tensAt < 0) {
+    return text.length === 1 ? CN_DIGITS[text] : undefined
+  }
+  const head = text.slice(0, tensAt)
+  const tail = text.slice(tensAt + 1)
+  const tens = head ? CN_DIGITS[head] : 1
+  const ones = tail ? CN_DIGITS[tail] : 0
+  if (tens === undefined || ones === undefined) return undefined
+  return tens * 10 + ones
+}
+
+/**
+ * 从番名里读出「第几季」。
+ *
+ * 这是为了防止把别的季的弹幕当成这一季：弹弹play 的搜索是子串匹配，
+ * 页面写「镇魂街 第五季」而库里只有「镇魂街 第四季」时，搜索照样返回
+ * 第四季。要是那成了唯一结果又被自动选中，屏幕上飘的就是上一季的弹幕，
+ * 而状态行看着一切正常 —— 这种错比匹配失败更难发现。
+ */
+export function seasonOf(title: string): number | undefined {
+  const marked = /第\s*([0-9]+|[零一二两三四五六七八九十]+)\s*[季期部]/.exec(title)
+  if (marked) return parseCount(marked[1])
+
+  const english = /\b(?:season|s)\s*([0-9]{1,2})\b/i.exec(title)
+  if (english) return Number(english[1])
+
+  return undefined
 }
 
 function escapeRegExp(text: string) {
@@ -269,19 +321,30 @@ export async function findAnime(
       continue
     }
 
+    // 关键词本身比 MIN_LCS 还短时（两字番名），不可能有 3 字的公共子串，
+    // 这时要求整串都对上，否则会把所有结果误杀。
+    const need = Math.min(MIN_LCS, squash(keyword).length)
     const relevant = list.filter(
-      (o) => longestCommonSubstring(keyword, o.name) >= MIN_LCS
+      (o) => longestCommonSubstring(keyword, o.name) >= need
     )
     if (relevant.length) {
       log?.(`「${keyword}」命中 ${relevant.length} 条`)
       // 弹弹play 按 bangumiId 升序返回，跟相关度无关；
       // 这里按「跟清洗后的页面标题的公共子串长度」重排，
-      // 让最像的那条排在候选列表第一个。
-      const ranked = [...relevant].sort(
-        (a, b) =>
+      // 让最像的那条排在候选列表第一个。季数对得上的再往前放，
+      // 免得「第五季」的候选列表第一条是「第四季」。
+      const want = seasonOf(title)
+      const ranked = [...relevant].sort((a, b) => {
+        if (want !== undefined) {
+          const pa = seasonOf(a.name) === want ? 1 : 0
+          const pb = seasonOf(b.name) === want ? 1 : 0
+          if (pa !== pb) return pb - pa
+        }
+        return (
           longestCommonSubstring(title, b.name) -
           longestCommonSubstring(title, a.name)
-      )
+        )
+      })
       return { animes: ranked, keyword, tried }
     }
     log?.(`「${keyword}」${list.length} 条结果都不相关`)
@@ -310,6 +373,27 @@ export function chooseAnime(
   const target = normalizeName(info.seriesName)
   const exact = animes.find((o) => normalizeName(o.name) === target)
   if (exact) return exact
+
+  // 页面标题写了第几季，就必须挑同一季。库里只有别的季时宁可让用户
+  // 自己选，也不能默默注入错的弹幕。
+  const want = seasonOf(info.seriesName)
+  if (want !== undefined) {
+    const sameSeason = animes.filter((o) => seasonOf(o.name) === want)
+    if (sameSeason.length === 1) return sameSeason[0]
+    if (sameSeason.length > 1) return undefined
+
+    // 一条同季的都没有：只接受压根没标季数的那种，
+    // 弹弹play 常把一部番的所有季塞进同一个条目（比如「因为太怕痛就
+    // 全点防御力了」只有一条，B 站页面却写「第二季」）。
+    //
+    // 但如果候选里还有别的条目标了季数，说明库里确实按季分开收，
+    // 那条没标季数的就是更早的季，不能拿来顶。
+    const seasonless = animes.filter((o) => seasonOf(o.name) === undefined)
+    if (seasonless.length === 1 && seasonless.length === animes.length) {
+      return seasonless[0]
+    }
+    return undefined
+  }
 
   // 只有一条候选时就是它
   if (animes.length === 1) return animes[0]

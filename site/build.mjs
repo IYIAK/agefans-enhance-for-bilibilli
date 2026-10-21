@@ -21,7 +21,7 @@ const SRC = join(here, 'src')
 
 const SITE = {
   name: 'Danmaku Enhance',
-  tagline: '把弹弹play 的弹幕送进哔哩哔哩原生播放器',
+  tagline: '把弹弹play的弹幕送进哔哩哔哩原生播放器',
   repo: 'https://github.com/IYIAK/agefans-enhance-for-bilibilli',
   upstream: 'https://github.com/IronKinoko/agefans-enhance',
   script: './index.user.js',
@@ -45,6 +45,7 @@ const ICONS = {
   search: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M10 4a6 6 0 1 0 3.7 10.7l4.3 4.3 1.4-1.4-4.3-4.3A6 6 0 0 0 10 4Zm0 2a4 4 0 1 1 0 8 4 4 0 0 1 0-8Z"/></svg>`,
   panel: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 4h18v16H3V4Zm2 2v12h14V6H5Zm8 2h6v4h-6V8Z"/></svg>`,
   clock: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16Zm-1 3v6l5 3 1-1.7-4-2.3V7h-2Z"/></svg>`,
+  github: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.9-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.9 1.52 2.34 1.08 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.1.39-1.99 1.03-2.69-.1-.25-.45-1.27.1-2.64 0 0 .84-.27 2.75 1.02a9.56 9.56 0 0 1 5 0c1.91-1.3 2.75-1.02 2.75-1.02.55 1.37.2 2.39.1 2.64.64.7 1.03 1.6 1.03 2.69 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85V21c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"/></svg>`,
 }
 
 // ── 布局 ────────────────────────────────────────────────
@@ -79,7 +80,7 @@ function layout({ title, description, page, body }) {
       <span>${esc(SITE.name)}</span>
       <small>v${esc(SITE.version)}</small>
     </a>
-    <nav class="site-nav">${nav}</nav>
+    <nav class="site-nav">${nav}<a class="gh-link" href="${SITE.repo}" rel="noopener" aria-label="GitHub 仓库" title="GitHub 仓库">${ICONS.github}</a></nav>
   </div>
 </header>
 ${body}
@@ -100,7 +101,7 @@ function homePage() {
     {
       icon: ICONS.danmaku,
       title: '弹幕混流，不换播放器',
-      desc: '把弹弹play 的弹幕并进 B 站原生弹幕流，播放器、快捷键、清晰度切换全都是你熟悉的那一套。',
+      desc: '把弹弹play的弹幕并进 B 站原生弹幕流，播放器、快捷键、清晰度切换全都是你熟悉的那一套。',
     },
     {
       icon: ICONS.layers,
@@ -167,7 +168,7 @@ function homePage() {
     },
     {
       q: '匹配到的番剧不对 / 搜不到？',
-      a: `<p>弹弹play 的搜索是纯子串包含，而且最多只返回 25 条、按 id 排序，所以短词搜不到是正常的 —— <strong>结果 0 条不代表库里没有</strong>。</p>
+      a: `<p>弹弹play的搜索是纯子串包含，而且最多只返回 25 条、按 id 排序，所以短词搜不到是正常的 —— <strong>结果 0 条不代表库里没有</strong>。</p>
          <p>用面板里的手动搜索框输入更长的、更接近原名的一段的试试；或者在 B 站找到对应视频，直接把链接贴进 URL 弹幕源。</p>`,
     },
     {
@@ -197,19 +198,32 @@ function homePage() {
       <h1>${esc(SITE.tagline)}</h1>
       <p class="lede">
         一个基于 agefans enhance 的 fork。不替换播放器，只接管弹幕分段请求 ——
-        把弹弹play、其他视频站的弹幕混进你正在看的那个 B 站视频里，
-        再配一套能按住刷屏的过滤器。
+        把弹弹play、B 站其他投稿、巴哈姆特的弹幕混进你正在看的这个视频里。
       </p>
       <div class="actions">
         <a class="btn btn--primary" href="${SITE.script}">安装脚本</a>
         <a class="btn btn--ghost" href="./changelog.html">查看更新日志</a>
       </div>
-      <div class="metrics">
-        <div class="metric"><div class="value">3</div><div class="label">URL 弹幕源上限</div></div>
-        <div class="metric"><div class="value">6</div><div class="label">级关键词匹配</div></div>
-        <div class="metric"><div class="value">±1.5s</div><div class="label">与原生去重窗口</div></div>
-        <div class="metric"><div class="value">2</div><div class="label">内置弹幕站点</div></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap">
+      <div class="section-head">
+        <h2>它解决什么</h2>
+        <p>弹幕通常和视频绑死：你在哪看，就只能看哪一份。</p>
       </div>
+      <div class="grid">
+        <article class="card">
+          <h3>小网站看番，卡不卡全看网络</h3>
+          <p>agefans enhance 的能力只覆盖那些小动漫站，而小站看番很吃网络环境，高峰期转圈缓冲是常事；B 站的 CDN 快、画质稳，看番体验好得多。</p>
+        </article>
+        <article class="card">
+          <h3>B 站弹幕分散在各个投稿</h3>
+          <p>同一部动画常有多个 up 投稿，观众被分流，弹幕跟着散在各个版本里；弹幕最多的那个投稿，又不一定是翻译、画质最好的。</p>
+        </article>
+      </div>
+      <p class="punch">这个脚本把「在哪看」和「看谁的弹幕」拆开 —— 留在 B 站流畅地看，弹幕从弹弹play、B 站的其他投稿、巴哈姆特搬进来。</p>
     </div>
   </section>
 
@@ -237,7 +251,7 @@ function homePage() {
     <div class="wrap">
       <div class="section-head">
         <h2>弹幕从哪来</h2>
-        <p>内置两个站点，粘贴链接自动识别；和弹弹play 可以同时生效。</p>
+        <p>内置两个站点，粘贴链接自动识别；和弹弹play可以同时生效。</p>
       </div>
       <div class="sources">
         ${sources

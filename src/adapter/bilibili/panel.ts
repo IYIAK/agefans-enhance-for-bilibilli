@@ -15,6 +15,7 @@ import {
 } from './hook'
 import {
   MatchError,
+  chooseAnime,
   chooseEpisode,
   cleanTitle,
   commentsOf,
@@ -815,9 +816,9 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     const exact = list.find((o) => squash(o.name).toLowerCase() === target)
     if (exact) return exact
 
-    // 只有一条候选时就是它
-    if (list.length === 1) return list[0]
-    return undefined
+    // 剩下的交给 chooseAnime，包括「页面写第五季、库里只有第四季
+    // 时不要自动选」这条 —— 面板这里别自己再实现一遍兜底逻辑。
+    return chooseAnime(list, info)
   }
 
   async function pickAnime(item: AnimeItem, opts: { silent?: boolean } = {}) {

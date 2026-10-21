@@ -134,6 +134,27 @@ code {
   color: var(--accent);
 }
 
+.site-nav .gh-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  margin-left: 8px;
+  border-radius: 11px;
+  color: var(--muted);
+}
+
+.site-nav .gh-link svg {
+  width: 28px;
+  height: 28px;
+}
+
+.site-nav .gh-link:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+}
+
 /* ── 首屏 ──────────────────────────────────────────────── */
 
 .hero {
@@ -283,6 +304,19 @@ code {
 .section-head p {
   margin: 0;
   color: var(--muted);
+}
+
+/* ── 痛点 ──────────────────────────────────────────────── */
+
+.punch {
+  margin: 20px 0 0;
+  padding: 16px 20px;
+  border: 1px solid rgba(251, 114, 153, 0.35);
+  border-radius: var(--radius);
+  background: var(--accent-dim);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
 }
 
 /* ── 卡片网格 ──────────────────────────────────────────── */
