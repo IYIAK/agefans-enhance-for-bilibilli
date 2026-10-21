@@ -1,6 +1,6 @@
 {
   "name": "danmaku-enhance",
-  "version": "1.60.9",
+  "version": "2.0.6",
   "description": "增强播放功能，实现自动换集、无缝换集、画中画、历史记录、断点续播、弹幕等功能。适配agefans、NT动漫、bimiacg、mutefun、次元城、稀饭动漫，并给哔哩哔哩注入弹弹play 弹幕",
   "main": "index.user.js",
   "type": "module",

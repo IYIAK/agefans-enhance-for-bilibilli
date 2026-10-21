@@ -1,12 +1,15 @@
 /**
  * 更新日志数据。
  *
- * 诚实优先：这个 fork 在 1.60.4 之前没有自己的版本号（一路沿用上游 1.60.3），
- * 所以早期改动不编造版本号，统一放在「开发迭代」里按组列出。 */
+ * 版本号规则：本项目从 fork 起点（上游 1.60.3）重新计数，
+ * 「哔哩哔哩弹幕注入」做成能日常用的那一刻记为 2.0.0；
+ * 之后新功能涨次版本号（2.1.0、2.2.0），修复与收尾涨修订号（2.0.1、2.0.2）。
+ * 之前那批 1.60.4～1.60.9 号是沿用上游主次号的临时编号，已按新规则对应过来。
+ */
 
 export const RELEASES = [
   {
-    version: '1.60.9',
+    version: '2.0.6',
     date: '2026-10-22',
     latest: true,
     summary: '图标对齐控制条、面板重新跟着页面滚动，并修掉画质标签把番名挤掉导致的匹配失败。',
@@ -30,7 +33,7 @@ export const RELEASES = [
     ],
   },
   {
-    version: '1.60.8',
+    version: '2.0.5',
     date: '2026-10-22',
     latest: false,
     summary: '控制条图标不再左右乱跳，面板也不再随着页面滚动被越压越矮。',
@@ -46,7 +49,7 @@ export const RELEASES = [
     ],
   },
   {
-    version: '1.60.7',
+    version: '2.0.4',
     date: '2026-10-22',
     latest: false,
     summary: '把面板里最常抱怨的五个小毛病一次收掉。',
@@ -69,7 +72,7 @@ export const RELEASES = [
     ],
   },
   {
-    version: '1.60.6',
+    version: '2.0.3',
     date: '2026-10-21',
     latest: false,
     summary: '批量拿真实番剧标题回测匹配，修掉三个藏得比较深的错配。',
@@ -85,7 +88,7 @@ export const RELEASES = [
     ],
   },
   {
-    version: '1.60.5',
+    version: '2.0.2',
     date: '2026-10-21',
     latest: false,
     summary:
@@ -110,11 +113,11 @@ export const RELEASES = [
     ],
   },
   {
-    version: '1.60.4',
+    version: '2.0.1',
     date: '2026-10-21',
     latest: false,
     summary:
-      '首个独立版本号。面板终于能自己说出「我在跑哪一版」，候选列表也能正常点选了。',
+      '首个带版本显示的发行版。面板终于能自己说出「我在跑哪一版」，候选列表也能正常点选了。',
     groups: [
       {
         name: '新增',
@@ -138,11 +141,11 @@ export const RELEASES = [
     ],
   },
   {
-    version: '开发迭代',
+    version: '2.0.0',
     date: '2026-10-20 ~ 2026-10-21',
     latest: false,
     summary:
-      '基于上游 1.60.3 的一整段开发，未单独发版。哔哩哔哩支持从「能注入」到「能日常用」的全部改动都在这里。',
+      '第一个正式版本：把哔哩哔哩从「没有支持」做到「能日常用」。本项目的版本号从这里重新计数，之前沿用的上游 1.60.3 不再参与。',
     groups: [
       {
         name: '弹幕注入',
@@ -213,10 +216,10 @@ export const RELEASES = [
     ],
   },
   {
-    version: '1.60.3',
+    version: '上游基线 1.60.3',
     date: '2026-10-20',
     latest: false,
-    summary: 'fork 起点，上游原样。',
+    summary: 'fork 起点，agefans enhance 原样，哔哩哔哩尚未支持。这一条属于上游，不算本项目的版本。',
     groups: [
       {
         name: '基线',
