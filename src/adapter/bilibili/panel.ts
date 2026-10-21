@@ -220,9 +220,15 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     'div',
     `${ROOT_CLASS}__section ${ROOT_CLASS}__section--row`
   )
-  const filterFold = el('button', `${ROOT_CLASS}__icon-text`, '展开')
+  // 折叠按钮做成纯箭头图标：标题栏已经被「已启用」「立即生效」两个文字按钮占满，
+  // 再塞一个「展开」两个字就会把「过滤器」挤得只剩一半宽度。
+  // 箭头本身是通用隐喻（朝下=有内容被收起），比文字省地方。
+  const filterFold = el('button', `${ROOT_CLASS}__fold-btn`)
   filterFold.type = 'button'
-  filterFold.title = '折叠/展开过滤设置'
+  filterFold.title = '展开过滤设置'
+  filterFold.setAttribute('aria-expanded', 'false')
+  filterFold.innerHTML =
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m6 9 6 6 6-6"/></svg>'
   const filterLabel = el('span', undefined, '过滤器')
   filterTitle.append(filterLabel)
   const filterToggle = el(
@@ -301,7 +307,9 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   filterBody.hidden = true
   filterFold.addEventListener('click', () => {
     filterBody.hidden = !filterBody.hidden
-    filterFold.textContent = filterBody.hidden ? '展开' : '收起'
+    filterFold.classList.toggle('is-expanded', !filterBody.hidden)
+    filterFold.setAttribute('aria-expanded', String(!filterBody.hidden))
+    filterFold.title = filterBody.hidden ? '展开过滤设置' : '收起过滤设置'
   })
 
   function readFilterFromDom(): FilterConfig {

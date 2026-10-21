@@ -3,10 +3,9 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    // 用户用 DevTools 圈出来的就是这两条：align-self: center + margin-right: 10px。
-    // 别再叠 transform: translateY()——B 站控制条自己有一套对齐，
-    // 我们额外挪 1px 反而会比邻居低一截，看着就是「掉下去了」。
-    align-self: center;
+    // 不要写 align-self：B 站控制条自己用一套对齐把按钮排在一条线上，
+    // 我们单独指定 center 反而会被顶得比邻居高一截/低一截，看着就是没对齐。
+    // 也不要用 transform 去补——补了 1px 反而更歪。让父级的对齐规则生效就好。
     width: 26px;
     height: 26px;
     margin-right: 10px;
@@ -294,6 +293,38 @@
     &:hover {
       border-color: #fb7299;
       color: #fff;
+    }
+  }
+
+  // 折叠箭头：跟旁边的文字按钮同高，但没有边框和文字，省宽度
+  &__fold-btn {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: #9ca3af;
+    cursor: pointer;
+    transition: transform 0.15s, color 0.15s;
+
+    svg {
+      width: 16px;
+      height: 16px;
+      display: block;
+    }
+
+    &:hover {
+      color: #fff;
+    }
+
+    // 展开后箭头朝上，跟「点一下会收回去」的方向一致
+    &.is-expanded {
+      transform: rotate(180deg);
+      color: #fb7299;
     }
   }
 

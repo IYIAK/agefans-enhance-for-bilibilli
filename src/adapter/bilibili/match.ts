@@ -275,14 +275,19 @@ export function buildKeywords(rawTitle: string): string[] {
   const longest = [...pool].sort((a, b) => b.length - a.length)[0]
   const first = pool[0]
 
+  // 顺序就是「精确 → 退化」的优先级，因为 findAnime 是命中即停的：
+  // 一旦某个短片段先命中，后面更精确的写法就没机会试了。
+  // 所以整串、去分隔符的整串、以及「第二季→尾数字 2」这种只改了季数后缀的
+  // 写法都排在前面——它们信息量最大，命中质量也最高；
+  // 切成片段、取半截、滑窗这些退化手段一律排后。
   const candidates = [
     title,
     squash(title),
+    seasonDigitVariant(title),
     longest,
     longest && longest.length >= 6 ? half(longest, 'head') : '',
     first,
     longest && longest.length >= 6 ? half(longest, 'tail') : '',
-    seasonDigitVariant(title),
   ]
 
   const seen = new Set<string>()
