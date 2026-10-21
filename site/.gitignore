@@ -1,0 +1,14 @@
+# 构建产物永不入库
+dist/
+
+# 部署配置含域名等个人账号信息，只留本地；模板见 wrangler.toml.example
+wrangler.toml
+.wrangler/
+
+# 本地预览/截图临时目录
+_shots/
+narrow.html
+serve.mjs
+
+# 依赖
+node_modules/

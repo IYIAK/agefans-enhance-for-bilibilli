@@ -1,0 +1,22 @@
+# Cloudflare Workers + 静态资源托管配置模板。
+#
+# 用法：复制成 wrangler.toml 后填入自己的账号信息与域名。
+#   cp wrangler.toml.example wrangler.toml
+#
+# wrangler.toml 已在 .gitignore 里 —— 域名属于个人配置，只留在本地，不进仓库。
+#
+# 部署：node ../node_modules/wrangler/bin/wrangler.js deploy --config wrangler.toml
+#
+# 注意：顶层键（name / compatibility_date / routes）必须写在任何 [table] 之前，
+#       写到 [assets] 后面会被当成它的字段并静默丢弃，域名绑不上且不报错。
+
+name = "danmaku-enhance"
+compatibility_date = "2026-06-30"
+
+# 把 pattern 换成你自己的域名；custom_domain = true 会自动创建并绑定 DNS 记录。
+# 域名必须托管在同一个 Cloudflare 账号下的 zone 里。
+routes = [{ pattern = "danmaku.example.com", custom_domain = true }]
+
+[assets]
+directory = "./dist"
+not_found_handling = "404-page"
