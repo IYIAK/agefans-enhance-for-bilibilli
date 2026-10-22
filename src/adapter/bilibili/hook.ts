@@ -17,8 +17,13 @@ const SEG_PATH = /\/x\/v2\/dm\/(?:wbi\/)?(?:web|list)\/seg\.so/
 const SEGMENT_MS = 6 * 60 * 1000
 /** 每个分段最多追加多少条，避免异常数据拖慢解码 */
 const MAX_PER_SEGMENT = 3000
-/** 等待弹幕匹配完成的最长时间（毫秒） */
+/** 等待弹幕匹配完成的最长时间（毫秒），只在实际有一次匹配在路上时才用满 */
 const LOAD_WAIT_MS = 4000
+/**
+ * 启动宽限期（毫秒）。播放器可能在 panel 调 setLoading 之前就发出第一段请求，
+ * 给这么一小段时间让匹配登记上来；超过还没登记就认定「没有匹配」，立刻放行。
+ */
+const STARTUP_GRACE_MS = 300
 /** 与原生弹幕去重的时间窗口（毫秒） */
 const NATIVE_DEDUPE_MS = 1500
 /** 第三方来源之间的去重窗口（巴哈姆特时间只精确到秒，放宽一点） */
@@ -873,22 +878,35 @@ function trackRequest(xhr: XHRWithContext, request: SegRequest) {
 /**
  * 等匹配出结果。播放器往往在弹弹play 返回之前就请求了第一段，
  * 现在请求由我们接管，可以放心地等数据到齐再回填回调。
+ *
+ * 但「等」必须是有前提的：只有在真的有一次匹配在路上时才值得等。
+ * 之前是无条件等满 4 秒——匹配失败、开关刚打开还没开始匹配、
+ * 或者根本没匹配上，这 4 秒就纯属白等，每段弹幕都晚 4 秒才显示。
+ * 现在改成：没有匹配在路上就只给一个很短的启动宽限期（覆盖
+ * 「请求先到、panel 后调 setLoading」这个竞态），然后立刻放行。
  */
 async function waitForLoading() {
   if (state.comments) return
+
   const deadline = Date.now() + LOAD_WAIT_MS
-  while (!state.comments && Date.now() < deadline) {
+  const graceDeadline = Date.now() + STARTUP_GRACE_MS
+  let sawLoading = false
+
+  while (Date.now() < deadline) {
     const loading = state.loading
     if (!loading) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 100))
+      // 已经在窄限期外，而且从头到尾没见过匹配：直接放行
+      if (!sawLoading && Date.now() >= graceDeadline) return
+      await new Promise<void>((resolve) => setTimeout(resolve, 50))
       continue
     }
+    sawLoading = true
     await loading.then(
       () => undefined,
       () => undefined
     )
     // 这一轮匹配已经结束却没有结果（没匹配上），继续等也没意义
-    if (!state.comments && state.loading === loading) break
+    if (!state.comments) return
   }
 }
 

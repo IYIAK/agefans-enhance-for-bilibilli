@@ -1104,8 +1104,19 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
   // 播放器切全屏/宽屏会重建控制条，按钮被丢掉就重新挂回去。
   // 面板本身的位置不再跟着 DOM 变动走——那会让它在滚动时乱跳。
+  //
+  // B 站页面的 DOM 变动极其频繁（弹幕列表、评论、推荐位都在动），
+  // 所以这里不能每次变动都跑一遍 querySelector：
+  //   1. 按钮还挂在文档里就直接返回，一次 parentElement 判断，零查询；
+  //   2. 真的掉了才用 rAF 合并，一帧最多修一次。
+  let replaceRaf = 0
   const onBodyMutation = new MutationObserver(() => {
-    placeButton()
+    if (detached || replaceRaf) return
+    if (button.isConnected && button.parentElement) return
+    replaceRaf = window.requestAnimationFrame(() => {
+      replaceRaf = 0
+      placeButton()
+    })
   })
   onBodyMutation.observe(document.body, { childList: true, subtree: true })
 
@@ -1126,11 +1137,15 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   /**
    * 页面换了（换视频、切分P、切集）就整体重置一遍。
    *
-   * 只比 cid/番名+集数这一组 key：B 站换视频时 videoData 是原地改写的，
-   * `readPageInfo()` 每次都会读到最新值，所以直接轮询比监听 DOM 稳。
-   * 1000ms 一次、只做几次字符串比较，开销可以忽略。
+   * 触发源（都不靠定时轮询）：
+   *   1. `<title>` 的 MutationObserver —— B 站换视频/切分P 一定会改标题；
+   *   2. runtime 派发的 `routechange` —— 走 pushState 的那部分跳转；
+   *   3. 用户点开面板时再核对一次 —— 少数软跳转可能连标题都没改。
+   *
+   * 只比 cid / 番名+集数这一组 key，key 没变就直接返回，
+   * 所以误报的代价只是几次属性读取。
    */
-  const pageWatch = window.setInterval(() => {
+  function checkPage() {
     if (detached) return
     const next = readPageInfo()
     if (next.live) return
@@ -1151,18 +1166,45 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       render()
       if (config.enabled) void ensureMatch()
     })()
-  }, 1000)
+  }
+
+  let checkTimer: number | undefined
+  function scheduleCheck() {
+    if (detached) return
+    if (checkTimer !== undefined) window.clearTimeout(checkTimer)
+    // 300ms 防抖：换视频时会连着改好几次标题和 DOM，等它稳定下来再判定
+    checkTimer = window.setTimeout(() => {
+      checkTimer = undefined
+      checkPage()
+    }, 300)
+  }
+
+  // 标题节点可能被整个替换掉，所以要观察 head 的子树而不是 title 元素本身
+  const titleWatch = new MutationObserver(scheduleCheck)
+  titleWatch.observe(document.head, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+  })
+  window.addEventListener('routechange', scheduleCheck)
+
+  // 打开面板时再核对一次：万一换视频时标题正好没变（少数软跳转），
+  // 用户点开面板这个动作本身就是最好的检查时机。
+  button.addEventListener('click', scheduleCheck)
 
   return {
     dispose() {
       detached = true
       if (anchorTimer !== undefined) window.clearTimeout(anchorTimer)
-      window.clearInterval(pageWatch)
+      if (checkTimer !== undefined) window.clearTimeout(checkTimer)
+      titleWatch.disconnect()
+      window.removeEventListener('routechange', scheduleCheck)
       document.removeEventListener('click', onDocumentClick, true)
       document.removeEventListener('mousedown', onDocumentMouseDown, true)
       window.removeEventListener('resize', onResize)
       window.removeEventListener('scroll', onScroll, true)
       if (scrollRaf) window.cancelAnimationFrame(scrollRaf)
+      if (replaceRaf) window.cancelAnimationFrame(replaceRaf)
       onBodyMutation.disconnect()
       unsubscribe()
       button.remove()

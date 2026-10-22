@@ -48,7 +48,25 @@ export class MatchError extends Error {
   }
 }
 
+/**
+ * 弹幕缓存：按集数存一份，换集之后旧的就没用了。
+ *
+ * 之前是无上限的 Map —— 一口气翻十几集长番，十几个 3000 条级的
+ * Comment 数组全留在内存里不释放。现在只保留最近两集（面板允许
+ * 在上一集/下一集之间来回切），更早的丢掉，需要时重新拉一次。
+ */
+const COMMENT_CACHE_SIZE = 2
 const commentCache = new Map<number, Comment[]>()
+
+function cacheComments(episodeId: number, comments: Comment[]) {
+  // Map 保留插入顺序：删掉最早的键就是最久没用的那一集
+  while (commentCache.size >= COMMENT_CACHE_SIZE) {
+    const oldest = commentCache.keys().next()
+    if (oldest.done) break
+    commentCache.delete(oldest.value)
+  }
+  commentCache.set(episodeId, comments)
+}
 
 /** 集数标记：第3话 / 第 12 集 / 第1~4话 / 全25话 / [1] / EP12 */
 const EPISODE_MARKERS: RegExp[] = [
@@ -497,7 +515,7 @@ export async function commentsOf(episodeId: number): Promise<Comment[]> {
   if (cached) return cached
 
   const comments = await getComments(episodeId)
-  commentCache.set(episodeId, comments)
+  cacheComments(episodeId, comments)
   return comments
 }
 
