@@ -234,13 +234,53 @@
     font-size: 11px;
   }
 
-  &__debug-toggle {
+  // 「详情」和「刷新」同一行：都是针对这条状态能做的动作
+  &__status-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     margin-top: 4px;
+  }
+
+  // 「刷新」补救按钮：只在「本段已缓存」时出现，图标态推到这一行最右端
+  &__status-reload {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    margin-left: auto;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background: none;
+    color: #60a5fa;
+    cursor: pointer;
+    transition: background-color 0.15s;
+
+    svg {
+      width: 13px;
+      height: 13px;
+      display: block;
+    }
+
+    &:hover {
+      background: rgba(96, 165, 250, 0.18);
+      color: #93c5fd;
+    }
+
+    &[hidden] {
+      display: none;
+    }
+  }
+
+  &__debug-toggle {
     padding: 0;
     border: 0;
     background: none;
     color: #60a5fa;
     font-size: 11px;
+    line-height: 1;
     cursor: pointer;
 
     &:hover {

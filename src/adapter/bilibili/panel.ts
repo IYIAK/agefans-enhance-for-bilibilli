@@ -173,6 +173,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   const status = el('div', `${ROOT_CLASS}__status`)
   const statusMain = el('div', `${ROOT_CLASS}__status-main`)
   const statusSub = el('div', `${ROOT_CLASS}__status-sub`)
+  const statusActions = el('div', `${ROOT_CLASS}__status-actions`)
   const debugToggle = el('button', `${ROOT_CLASS}__debug-toggle`, '详情')
   debugToggle.type = 'button'
   const debugBox = el('div', `${ROOT_CLASS}__debug`)
@@ -185,13 +186,22 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   // 已经取过的那一段不会再请求第二次；bundle 里唯一能清这块缓存的 loadDmPbAll(reset)
   // 是死代码，也没有对外句柄。所以「这一段在我打开开关/选好集之前就取走了」这种情况，
   // 除了刷新页面没有别的补救办法。好在匹配结果按番名记着，刷新后第一段请求就能赶上。
-  const pageReloadBtn = el('button', `${ROOT_CLASS}__mini`, '刷新页面生效')
+  //
+  // 文案上只给一句极短的「本段已缓存」，完整因果放在图标的 title 和「详情」里：
+  // 这是一条边缘状态，不值得为它常驻一整行长解释，也不能让它把状态区撑高。
+  // 按钮跟「详情」同一行 —— 都是「针对这条状态能做的动作」，放一起才有归属感。
+  const pageReloadBtn = el('button', `${ROOT_CLASS}__status-reload`)
   pageReloadBtn.type = 'button'
   pageReloadBtn.hidden = true
-  pageReloadBtn.title = '播放器已经缓存了这一段弹幕，只有刷新页面才会重新请求'
+  pageReloadBtn.title = '这一段在打开开关前就取走了，播放器不会重发；点这里刷新页面'
+  pageReloadBtn.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/>' +
+    '<path d="M21 3v6h-6"/></svg>'
   pageReloadBtn.addEventListener('click', () => location.reload())
 
-  status.append(statusMain, statusSub, debugToggle, debugBox, pageReloadBtn)
+  statusActions.append(debugToggle, pageReloadBtn)
+  status.append(statusMain, statusSub, statusActions, debugBox)
 
   // URL 源
   const urlTitle = el('div', `${ROOT_CLASS}__section`, 'URL 弹幕源')
@@ -712,9 +722,9 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       } else if (stats.requests === 0) {
         statusSub.textContent = '等待播放器请求弹幕…'
       } else if (stats.armed === 0) {
-        // 打开开关之前这一段就已经取走了，播放器把它缓存在内存里不会重发
-        statusSub.textContent =
-          '这一段在开关打开前就取走了，播放器不会重发，刷新页面即可生效'
+        // 打开开关之前这一段就已经取走了，播放器把它缓存在内存里不会重发。
+        // 状态行只留最短的一句，完整因果交给右端的 ↻ 图标和「详情」。
+        statusSub.textContent = '本段已缓存，刷新生效'
         pageReloadBtn.hidden = false
       } else if (stats.reads === 0) {
         statusSub.textContent = '已拦截请求，但还没有接管到响应'
