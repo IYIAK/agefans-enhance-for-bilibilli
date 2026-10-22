@@ -67,8 +67,17 @@ function readVideoInfo(): BiliPageInfo | undefined {
 
   if (!cid && !title) return undefined
 
-  // 多分P 时用分P 名当集名；单P 视频没有“集”的概念，交给手动选择
-  const episode = pages.length > 1 ? String(pageData?.part || '').trim() : ''
+  // 多分P 时用分P 名当集名；单P 视频没有“集”的概念，交给手动选择。
+  // UGC 合集（投稿的「视频选集」）分P 名常常就是纯数字 `01`、`02`，
+  // 这时归一成 `2`，交给 chooseEpisode 的强匹配去对「第2话」；
+  // 分P 名为空也退回分P 序号，否则合集里永远匹配不到集数。
+  const rawPart = String(pageData?.part || '').trim()
+  const episode =
+    pages.length > 1
+      ? /^[0-9]+(?:\.[0-9]+)?$/.test(rawPart)
+        ? String(parseFloat(rawPart))
+        : rawPart || String(page)
+      : ''
 
   return {
     live: false,

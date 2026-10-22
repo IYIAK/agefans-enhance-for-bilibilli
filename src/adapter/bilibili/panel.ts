@@ -4,10 +4,12 @@
  * 入口是控制条右侧的一个图标按钮，点开才显示面板（点面板外面自动收起），
  * 找不到控制条时退化成一个右下角的小胶囊。
  */
+import { readPageInfo } from './info'
 import type { BiliPageInfo } from './info'
 import {
   forceReloadDanmaku,
   getStats,
+  setCid,
   setComments,
   setDedupe,
   setEnabled,
@@ -133,6 +135,13 @@ function pageKeyOf(info: BiliPageInfo) {
 export function mountPanel(info: BiliPageInfo): PanelHandle {
   const config: BiliConfig = loadConfig()
 
+  // 页面信息不能只在挂载时取一次。B 站换视频/切分P 有时并不重新执行
+  // runtime 的 run()（相关推荐是局部重渲染，甚至不走 pushState），
+  // 闭包里留着旧快照就会出现「用上一个视频的标题在匹配」。
+  // 这里保留一个可变引用，另加一个轻量轮询发现变化后整体重置。
+  let currentInfo: BiliPageInfo = info
+  let currentPageKey = pageKeyOf(info)
+
   // ── 控制条按钮 ───────────────────────────────────────────
   const button = el('div', `${ROOT_CLASS}__btn`)
   button.title = '第三方弹幕'
@@ -225,7 +234,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   const searchInput = el('input', `${ROOT_CLASS}__input`) as HTMLInputElement
   searchInput.type = 'text'
   searchInput.placeholder = '番剧名（子串匹配）'
-  searchInput.value = cleanTitle(info.seriesName)
+  searchInput.value = cleanTitle(currentInfo.seriesName)
   const searchBtn = el('button', `${ROOT_CLASS}__mini`, '搜索')
   searchRow.append(searchInput, searchBtn)
 
@@ -715,17 +724,21 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
           : `已注入 ${stats.injected} 条（${stats.segments} 段）${
               extra ? `（${extra}）` : ''
             }`
+      } else if (stats.requests > 0 && stats.segments === 0 && stats.armed === 0) {
+        // 打开开关之前这一段就已经取走了，播放器把它缓存在内存里不会重发。
+        //
+        // 这个判断必须排在 filtered 之前、也不能依赖 reads：手动选集时当前段
+        // 早就请求过了（requests>0 但 armed===0），而 reads 可能因为别的原因
+        // 有值，条件一多就会滑到最后那个「已接管请求」的兜底分支上，
+        // 于是用户明明处在该刷新的状态，却看不到任何提示。
+        statusSub.textContent = '本段已缓存，刷新生效'
+        pageReloadBtn.hidden = false
       } else if (stats.filtered > 0 || stats.droppedNative > 0) {
         statusSub.textContent = `当前分段没有可注入的弹幕，过滤器已作用在原生弹幕上（过滤 ${
           stats.filtered
         }${stats.droppedNative ? ` · 密度裁剪 ${stats.droppedNative}` : ''}）`
       } else if (stats.requests === 0) {
         statusSub.textContent = '等待播放器请求弹幕…'
-      } else if (stats.armed === 0) {
-        // 打开开关之前这一段就已经取走了，播放器把它缓存在内存里不会重发。
-        // 状态行只留最短的一句，完整因果交给右端的 ↻ 图标和「详情」。
-        statusSub.textContent = '本段已缓存，刷新生效'
-        pageReloadBtn.hidden = false
       } else if (stats.reads === 0) {
         statusSub.textContent = '已拦截请求，但还没有接管到响应'
       } else {
@@ -885,7 +898,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
     const task = (async () => {
       try {
-        const keyword = cleanTitle(info.seriesName)
+        const keyword = cleanTitle(currentInfo.seriesName)
         if (!keyword) throw new MatchError('没识别到当前视频的标题')
 
         // 走 6 候选关键词流程：命中即停，比整串搜索更容易命中
@@ -930,16 +943,16 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     if (!list.length) return undefined
 
     // 记住的映射优先
-    const remembered = rememberedAnime(list, info.seriesName)
+    const remembered = rememberedAnime(list, currentInfo.seriesName)
     if (remembered) return remembered
 
-    const target = squash(info.seriesName).toLowerCase()
+    const target = squash(currentInfo.seriesName).toLowerCase()
     const exact = list.find((o) => squash(o.name).toLowerCase() === target)
     if (exact) return exact
 
     // 剩下的交给 chooseAnime，包括「页面写第五季、库里只有第四季
     // 时不要自动选」这条 —— 面板这里别自己再实现一遍兜底逻辑。
-    return chooseAnime(list, info)
+    return chooseAnime(list, currentInfo)
   }
 
   async function pickAnime(item: AnimeItem, opts: { silent?: boolean } = {}) {
@@ -960,7 +973,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
         return
       }
       episodeOptions = list
-      const guess = chooseEpisode(list, info)
+      const guess = chooseEpisode(list, currentInfo)
       if (guess) {
         await pickEpisode(guess, opts)
         return
@@ -1000,7 +1013,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       notice = ''
       busy = false
       setComments(comments)
-      rememberMatch(info, current, ep)
+      rememberMatch(currentInfo, current, ep)
       render()
       // 弹幕就绪：让播放器把当前分段重新取一遍，否则已缓存的分段不会经过 hook
       reloadDanmaku()
@@ -1098,7 +1111,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
   // ── 初始化 ──────────────────────────────────────────────
   // URL 来源是按页面存的：换视频就不该看到上一个视频的来源
-  setPageKey(pageKeyOf(info))
+  setPageKey(currentPageKey)
   setEnabled(config.enabled)
   setDedupe(config.dedupe)
   resetUrlSources()
@@ -1110,10 +1123,41 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     if (config.enabled) void ensureMatch()
   })()
 
+  /**
+   * 页面换了（换视频、切分P、切集）就整体重置一遍。
+   *
+   * 只比 cid/番名+集数这一组 key：B 站换视频时 videoData 是原地改写的，
+   * `readPageInfo()` 每次都会读到最新值，所以直接轮询比监听 DOM 稳。
+   * 1000ms 一次、只做几次字符串比较，开销可以忽略。
+   */
+  const pageWatch = window.setInterval(() => {
+    if (detached) return
+    const next = readPageInfo()
+    if (next.live) return
+    const nextKey = pageKeyOf(next)
+    if (nextKey === currentPageKey) return
+
+    currentInfo = next
+    currentPageKey = nextKey
+    searchInput.value = cleanTitle(next.seriesName)
+    matchTip.textContent = ''
+    resetMatch('')
+    setCid(next.cid)
+    setPageKey(nextKey)
+    resetUrlSources()
+    render()
+    void (async () => {
+      await restoreSources()
+      render()
+      if (config.enabled) void ensureMatch()
+    })()
+  }, 1000)
+
   return {
     dispose() {
       detached = true
       if (anchorTimer !== undefined) window.clearTimeout(anchorTimer)
+      window.clearInterval(pageWatch)
       document.removeEventListener('click', onDocumentClick, true)
       document.removeEventListener('mousedown', onDocumentMouseDown, true)
       window.removeEventListener('resize', onResize)
