@@ -46,6 +46,50 @@ function toNumber(value: unknown): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined
 }
 
+interface PageItem {
+  cid?: number
+  page?: number
+  part?: string
+}
+
+/** 当前 URL 上的视频号。软跳转（相关推荐）时只有它一定会变。 */
+export function readBvid(): string | undefined {
+  return location.pathname.match(/\/video\/(BV[0-9A-Za-z]+)/)?.[1]
+}
+
+/**
+ * 当前 URL 上的番剧集号（ep_id）。
+ *
+ * 番剧页没有 bvid，换集/点相关推荐时 URL 上变的是 `/bangumi/play/ep123`，
+ * 所以这一路要单独有一个「不会撒谎」的信号，否则番剧页永远发现不了换集。
+ */
+export function readEpisodeId(): number | undefined {
+  const fromPath = location.pathname.match(/\/bangumi\/play\/ep(\d+)/)
+  if (fromPath) return toNumber(fromPath[1])
+  return toNumber(new URLSearchParams(location.search).get('ep_id'))
+}
+
+/**
+ * 当前分P 序号。B 站不会给 p=1 写参数，所以没有 p 就是第 1 分P；
+ * `__INITIAL_STATE__.p` 在站内切换后是过期值，不能用来兜底。
+ */
+function readUrlPage(): number {
+  return toNumber(new URLSearchParams(location.search).get('p')) ?? 1
+}
+
+/**
+ * 多分P 时用分P 名当集名；单P 视频没有「集」的概念，交给手动选择。
+ * UGC 合集（投稿的「视频选集」）分P 名常常就是纯数字 `01`、`02`，
+ * 这时归一成 `2`，交给 chooseEpisode 的强匹配去对「第2话」；
+ * 分P 名为空也退回分P 序号，否则合集里永远匹配不到集数。
+ */
+function episodeOf(pages: PageItem[], index: number): string {
+  if (pages.length <= 1) return ''
+  const rawPart = String(pages[index]?.part || '').trim()
+  if (/^[0-9]+(?:\.[0-9]+)?$/.test(rawPart)) return String(parseFloat(rawPart))
+  return rawPart || String(index + 1)
+}
+
 /** 直播页没有可注入的 cid，且播放器实现完全不同 */
 export function isLivePage(): boolean {
   if (/(^|\.)live\.bilibili\.com$/.test(location.hostname)) return true
@@ -53,13 +97,172 @@ export function isLivePage(): boolean {
 }
 
 function readVideoInfo(): BiliPageInfo | undefined {
+  const videoData = currentVideoData()
+  if (!videoData) return undefined
+  return buildVideoInfo(videoData, readUrlPage())
+}
+
+/**
+ * 按 cid 反查分P。
+ *
+ * 为什么需要它：切分P 时 URL 上的 `?p=` 并不总是更新（有的入口是纯前端切，
+ * 有的合集页干脆没有 p 参数），`__INITIAL_STATE__` 更是只在首屏渲染时写过一次。
+ * 但播放器每次换集都必须用新的 cid 去请求弹幕——这个 cid 我们拦得到，
+ * 拿它回查 pages 就能定出到底是第几分P，比猜 URL 可靠。
+ *
+ * 注意：某些页面（如新版「视频播客」合集页）在运行时会把
+ * `__INITIAL_STATE__.videoData.pages` 替换或清空，SSR 里明明有 19 条、
+ * 运行时却查不到。所以这里做两层：先查内存里的 pages，查不到再
+ * 异步拉 `x/player/pagelist` 接口（匿名可用，返回全量分P）。
+ */
+export function readVideoInfoByCid(cid: number): BiliPageInfo | undefined {
+  const videoData = currentVideoData()
+  if (!videoData) return undefined
+  const pages = Array.isArray(videoData.pages) ? videoData.pages : []
+  const index = pages.findIndex((o) => toNumber(o?.cid) === cid)
+  if (index < 0) return undefined
+  return buildVideoInfo(videoData, index + 1)
+}
+
+/**
+ * 内存里的视频状态，只在它确实属于当前 URL 的视频时才返回。
+ *
+ * 点相关推荐软跳转时 `__INITIAL_STATE__` 不重写，里面还是上一个视频的
+ * title 和 pages —— 直接拿来用就会「换了视频还在用旧标题匹配」，
+ * 而且旧视频的 pages 里查不到新视频的 cid，cid 反查也会跟着失效。
+ */
+function currentVideoData(): NonNullable<InitialState['videoData']> | undefined {
   const state = (window as any).__INITIAL_STATE__ as InitialState | undefined
   const videoData = state?.videoData
   if (!videoData) return undefined
+  const urlBvid = readBvid()
+  if (urlBvid && videoData.bvid && videoData.bvid !== urlBvid) return undefined
+  return videoData
+}
 
-  // SPA 切分P 时 __INITIAL_STATE__ 可能还没更新，优先用 URL 上的 p
-  const urlPage = toNumber(new URLSearchParams(location.search).get('p'))
-  const page = Math.max(1, urlPage ?? (Number(state?.p) || 1))
+/**
+ * cid 反查的接口兜底：`x/player/pagelist?bvid=`（匿名可用，零 header）。
+ * 结果按 bvid 缓存——一个视频的分P 列表不会变。
+ */
+const pageListCache = new Map<string, PageItem[]>()
+const titleCache = new Map<string, string>()
+
+/** 拿不到页面标题时的接口兜底（软跳转到新视频、DOM 还没刷出新标题时） */
+async function fetchVideoTitle(bvid: string): Promise<string> {
+  const cached = titleCache.get(bvid)
+  if (cached) return cached
+  try {
+    const res = await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`, {
+      credentials: 'omit',
+    })
+    const body = (await res.json()) as { code?: number; data?: { title?: string } }
+    if (body?.code !== 0) return ''
+    const title = String(body.data?.title || '').trim()
+    if (title) titleCache.set(bvid, title)
+    return title
+  } catch {
+    return ''
+  }
+}
+
+export async function readVideoInfoByCidAsync(cid: number): Promise<BiliPageInfo | undefined> {
+  // 1) 内存里的 pages 还能用就直接用
+  const local = readVideoInfoByCid(cid)
+  if (local) return local
+
+  // 2) 从 URL 提 bvid，走接口拉全量分P
+  const bvid = readBvid()
+  if (!bvid) return undefined
+
+  let pages = pageListCache.get(bvid)
+  if (!pages) {
+    try {
+      const res = await fetch(
+        `https://api.bilibili.com/x/player/pagelist?bvid=${bvid}`,
+        { credentials: 'omit' }
+      )
+      const body = (await res.json()) as { code?: number; data?: PageItem[] }
+      if (body?.code !== 0 || !Array.isArray(body.data)) return undefined
+      pages = body.data
+      pageListCache.set(bvid, pages)
+    } catch {
+      return undefined
+    }
+  }
+
+  const index = pages.findIndex((o) => toNumber(o?.cid) === cid)
+  if (index < 0) return undefined
+
+  // 标题按可靠性排序：内存状态（只在属于当前视频时才有效）→ 按 bvid 问接口
+  // → 页面 DOM。
+  //
+  // 接口必须排在 DOM 前面：软跳转（点相关推荐）之后 `document.title` 常常
+  // 还是上一个视频的名字，比接口慢一拍甚至好几秒。之前把 DOM 排在前面，
+  // 于是「换集」这条路径也会把上一个视频的标题带进来 —— 面板看着换了页，
+  // 匹配却仍拿旧番名在搜。接口结果按 bvid 缓存，同一视频只会问一次。
+  const videoData = currentVideoData()
+  const title = videoData
+    ? String(videoData.title || '').trim()
+    : (await fetchVideoTitle(bvid)) || readDomInfo().seriesName
+  if (!title) return undefined
+
+  return {
+    live: false,
+    seriesName: title,
+    episode: episodeOf(pages, index),
+    cid,
+    aid: toNumber(videoData?.aid),
+    source: 'video',
+  }
+}
+
+/**
+ * 按 bvid 拿当前页面视频的信息。
+ *
+ * 专门用于「点相关推荐软跳到另一个视频」：URL 已经是新 bvid，但
+ * `__INITIAL_STATE__` 还在上一个视频上（`currentVideoData()` 会因此返回
+ * undefined），`document.title` 也可能慢半拍。这时只能问接口。
+ */
+export async function readVideoInfoByBvidAsync(bvid: string): Promise<BiliPageInfo | undefined> {
+  const local = currentVideoData()
+  if (local) {
+    const info = buildVideoInfo(local, readUrlPage())
+    if (info) return info
+  }
+
+  const title = await fetchVideoTitle(bvid)
+  if (!title) return undefined
+
+  const page = readUrlPage()
+  let pages = pageListCache.get(bvid)
+  if (!pages) {
+    try {
+      const res = await fetch(`https://api.bilibili.com/x/player/pagelist?bvid=${bvid}`, {
+        credentials: 'omit',
+      })
+      const body = (await res.json()) as { code?: number; data?: PageItem[] }
+      if (body?.code === 0 && Array.isArray(body.data)) {
+        pages = body.data
+        pageListCache.set(bvid, pages)
+      }
+    } catch {
+      pages = undefined
+    }
+  }
+
+  return {
+    live: false,
+    seriesName: title,
+    episode: pages ? episodeOf(pages, page - 1) : '',
+    cid: toNumber(pages?.[page - 1]?.cid),
+    source: 'video',
+  }
+}
+
+function buildVideoInfo(
+  videoData: NonNullable<InitialState['videoData']>,
+  page: number
+): BiliPageInfo | undefined {
   const pages = Array.isArray(videoData.pages) ? videoData.pages : []
   const pageData = pages[page - 1]
   const cid = toNumber(pageData?.cid) ?? toNumber(videoData.cid)
@@ -67,22 +270,10 @@ function readVideoInfo(): BiliPageInfo | undefined {
 
   if (!cid && !title) return undefined
 
-  // 多分P 时用分P 名当集名；单P 视频没有“集”的概念，交给手动选择。
-  // UGC 合集（投稿的「视频选集」）分P 名常常就是纯数字 `01`、`02`，
-  // 这时归一成 `2`，交给 chooseEpisode 的强匹配去对「第2话」；
-  // 分P 名为空也退回分P 序号，否则合集里永远匹配不到集数。
-  const rawPart = String(pageData?.part || '').trim()
-  const episode =
-    pages.length > 1
-      ? /^[0-9]+(?:\.[0-9]+)?$/.test(rawPart)
-        ? String(parseFloat(rawPart))
-        : rawPart || String(page)
-      : ''
-
   return {
     live: false,
     seriesName: title,
-    episode,
+    episode: episodeOf(pages, page - 1),
     cid,
     aid: toNumber(videoData.aid),
     source: 'video',

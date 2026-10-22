@@ -145,6 +145,7 @@ export function resetPageState() {
   state.loading = null
   state.cid = undefined
   state.stats = emptyStats()
+  lastRequestOid = null
 }
 
 function emptyStats(): HookStats {
@@ -611,11 +612,49 @@ function buildInjections(
   return result.bytes
 }
 
+/**
+ * 播放器实际请求的 cid 变了（切了分P / 切了集）。
+ *
+ * 为什么需要这个：切分P 时 URL 上的 `?p=` 不一定更新，`__INITIAL_STATE__`
+ * 更是只在首屏写过一次，于是面板那边靠读页面信息压根发现不了换集；
+ * 但播放器每次换集都必须用新 cid 去请求弹幕。所以这里把「拦截到的 cid」
+ * 当成换集的最可靠信号，让面板据此重新匹配集数。
+ */
+const cidListeners = new Set<(cid: number) => void>()
+
+export function onCidChange(listener: (cid: number) => void) {
+  cidListeners.add(listener)
+  return () => {
+    cidListeners.delete(listener)
+  }
+}
+
+function notifyCid(cid: number) {
+  if (!cidListeners.size) return
+  for (const listener of cidListeners) {
+    try {
+      listener(cid)
+    } catch (error) {
+      console.warn('[danmaku-enhance] cid 变化回调出错', error)
+    }
+  }
+}
+
+/** 上一次见到的请求 cid，用来发现「换集了」 */
+let lastRequestOid: number | null = null
+
 /** 记一次弹幕分段请求（不管开关是否开启都记，方便诊断） */
 function countRequest(request: SegRequest | undefined) {
   if (!request) return
   state.stats.requests++
   if (state.enabled) state.stats.armed++
+  // 播放器请求的 cid 变了 = 真的换集了。这条信号比读页面信息可靠得多：
+  // 切分P 时 URL 上的 p 不一定更新、__INITIAL_STATE__ 也不会重写。
+  const oid = request.oid
+  if (oid && oid !== lastRequestOid) {
+    lastRequestOid = oid
+    notifyCid(oid)
+  }
 }
 
 /**
@@ -648,63 +687,15 @@ function playerController(): any {
 
 export async function forceReloadDanmaku(): Promise<string> {
   const player = playerController()
-  const video = document.querySelector('video') as HTMLVideoElement | null
 
-  const attempts: { name: string; fn: () => void }[] = [
-    { name: 'player.reloadDanmaku', fn: () => player?.reloadDanmaku?.() },
-    {
-      name: 'player.setDanmaku',
-      fn: () => player?.setDanmaku?.(true),
-    },
-    {
-      name: '弹幕开关切换',
-      fn: () => {
-        // 关掉再打开，播放器会清掉分段缓存并重新请求
-        const btn = document.querySelector(
-          [
-            '.bpx-player-ctrl-dm',
-            '.bpx-player-dm-switch',
-            '.bilibili-player-video-btn-danmaku',
-            '[aria-label*="弹幕"]',
-            '[aria-label*="danmaku" i]',
-          ].join(',')
-        ) as HTMLElement | null
-        if (!btn) return
-        btn.click()
-        setTimeout(() => btn.click(), 150)
-      },
-    },
-    {
-      name: 'player.seek',
-      fn: () => {
-        if (!video) return
-        const t = video.currentTime
-        player?.seek?.(Math.max(0, t - 0.3))
-        player?.seek?.(t)
-      },
-    },
-    {
-      name: 'video.currentTime',
-      fn: () => {
-        if (!video) return
-        const t = video.currentTime
-        video.currentTime = Math.max(0, t - 0.3)
-        video.currentTime = t
-      },
-    },
-  ]
-
-  for (const attempt of attempts) {
-    try {
-      const before = requestTicks()
-      attempt.fn()
-      await sleep(RELOAD_WAIT_MS)
-      if (requestTicks() > before) return attempt.name
-    } catch (error) {
-      console.warn('[danmaku-enhance] 重新加载弹幕失败', attempt.name, error)
-    }
-  }
-  return ''
+  // 运行时强制重发弹幕的方案全部试过并被否掉：
+  // reloadDanmaku/setDanmaku/弹幕开关在播放器 bundle 里不存在或只是渲染
+  // 开关；player.reload 会整集重载把进度跳走；跨段 seek 会把播放位置挪走。
+  // 现在唯一的用途是换集后探测播放器是否自行重发了请求——不再主动
+  // 触发任何跳转，只观察 800ms 内 requests 计数有没有自然增长。
+  const before = requestTicks()
+  await sleep(RELOAD_WAIT_MS)
+  return requestTicks() > before ? '播放器自行重载' : ''
 }
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -1267,6 +1258,10 @@ export function installHook() {
   }
 
   console.info('[danmaku-enhance] 已安装弹幕拦截', {
+    version:
+      typeof GM_info !== 'undefined'
+        ? ((GM_info as { script?: { version?: string } })?.script?.version ?? '')
+        : '',
     sameWindow: page === window,
     hookUrl: SEG_PATH.source,
     mode: '接管 XHR',

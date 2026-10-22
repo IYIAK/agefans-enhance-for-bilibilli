@@ -4,11 +4,12 @@
  * 入口是控制条右侧的一个图标按钮，点开才显示面板（点面板外面自动收起），
  * 找不到控制条时退化成一个右下角的小胶囊。
  */
-import { readPageInfo } from './info'
+import { readBvid, readEpisodeId, readPageInfo, readVideoInfoByBvidAsync, readVideoInfoByCidAsync } from './info'
 import type { BiliPageInfo } from './info'
 import {
   forceReloadDanmaku,
   getStats,
+  onCidChange,
   setCid,
   setComments,
   setDedupe,
@@ -36,6 +37,7 @@ import type { BiliConfig } from './store'
 import {
   addSource,
   getEntries,
+  getTotalCount,
   removeSource,
   resetUrlSources,
   restoreSources,
@@ -44,6 +46,7 @@ import {
   subscribe,
 } from './sources/state'
 import type { UrlSourceEntry } from './sources/state'
+import { clearToast, disposeToast, showToast } from './toast'
 
 const ROOT_CLASS = 'k-bili-dm'
 
@@ -125,10 +128,17 @@ function formatOffset(offsetMs: number) {
 
 /**
  * URL 来源的页面标识。优先用 cid（同一集的不同分P、不同线路都能区分开），
- * 拿不到 cid 时退回「番名 + 集数」。
+ * 拿不到 cid 时用「当前 URL 上的 bvid + 集数」。
+ *
+ * 不能只用「番名 + 集数」：点相关推荐软跳转到另一个视频时，页面标题和
+ * `__INITIAL_STATE__` 都可能还是上一个视频的，两条视频又都没读到 cid，
+ * key 就一模一样，于是「换了视频还是上一个视频的匹配结果」。
+ * bvid 是 URL 里唯一不会骗人的东西。
  */
 function pageKeyOf(info: BiliPageInfo) {
   if (info.cid) return `cid:${info.cid}`
+  const vid = readBvid()
+  if (vid) return `vid:${vid}#${info.episode ?? ''}`
   return `${info.seriesName || ''}#${info.episode ?? ''}`
 }
 
@@ -141,6 +151,9 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   // 这里保留一个可变引用，另加一个轻量轮询发现变化后整体重置。
   let currentInfo: BiliPageInfo = info
   let currentPageKey = pageKeyOf(info)
+  // URL 上的 bvid / ep_id。换视频、换集时它们是唯一立刻变化又不会撒谎的信号
+  let currentVid = readBvid()
+  let currentEp = readEpisodeId()
 
   // ── 控制条按钮 ───────────────────────────────────────────
   const button = el('div', `${ROOT_CLASS}__btn`)
@@ -267,12 +280,14 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   )
   filterToggle.type = 'button'
   filterToggle.title = '过滤对原生与第三方弹幕一起生效'
-  // 这个按钮的作用是「让已经缓冲好的分段用新规则重来一遍」，不是保存
-  // （改动本身在 change 时就存了）。所以文案直接写它的效果。
-  const filterReload = el('button', `${ROOT_CLASS}__icon-text`, '立即生效')
+  // 运行时重载都试过了：player.reload 会让视频重新缓冲并把进度跳走，
+  // 跨段 seek 会把播放位置挪到别的段——都被用户否掉。过滤器改动本来就
+  // 即时保存、对之后的段生效，真要全部重取就老实刷新页面。
+  const filterReload = el('button', `${ROOT_CLASS}__icon-text`, '刷新生效')
   filterReload.type = 'button'
-  filterReload.title = '让播放器重新请求当前分段，过滤改动立刻应用到已经加载的弹幕'
-  // 折叠按钮放最右：它管的是整块内容的显示，和「已启用」「立即生效」
+  filterReload.title = '改动已保存；刷新页面后重新拉取弹幕'
+  filterReload.addEventListener('click', () => location.reload())
+  // 折叠按钮放最右：它管的是整块内容的显示，和「已启用」「刷新生效」
   // 这两个作用在弹幕上的开关不是一类，夹在中间会让人以为它也改配置。
   filterTitle.append(filterToggle, filterReload, filterFold)
 
@@ -327,7 +342,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   const filterTip = el(
     'div',
     `${ROOT_CLASS}__tip`,
-    '改完只影响之后加载的分段；点「立即生效」可以让已经加载的弹幕也重新过一遍'
+    '改动即时保存，对之后的弹幕生效；点「刷新生效」全部重取'
   )
 
   // 过滤器默认收起：它是最少改的一块，展开后要把面板撑得很长
@@ -367,7 +382,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   function onFilterChange() {
     filterConfig = readFilterFromDom()
     saveFilter(filterConfig)
-    filterTip.textContent = '已保存；点「立即生效」可以让已经加载的弹幕也重新过一遍'
+    filterTip.textContent = '已保存，点「刷新生效」全部重取'
     render()
   }
 
@@ -615,10 +630,12 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     saveConfig(config)
     setEnabled(config.enabled)
     render()
-    if (config.enabled) void ensureMatch()
-    else {
+    if (config.enabled) {
+      void ensureMatch()
+    } else {
       setComments(null)
       setLoading(null)
+      clearToast()
     }
   })
 
@@ -639,8 +656,14 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   let busy = false
   let reloadHint = ''
   let reloading = false
+  // 匹配序号：每重置一次就 +1，异步链路在每个 await 之后核对。
+  // 换视频/换集时上一轮的网络请求可能晚一步才回来，不拦住它就会把
+  // 上一个视频的番名、集数、弹幕写进新页面——表现就是「换了视频还是
+  // 上一个视频的匹配结果」。
+  let matchSeq = 0
 
   function resetMatch(nextNotice = '') {
+    matchSeq++
     anime = undefined
     episode = undefined
     candidateList = []
@@ -648,6 +671,11 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     tried = []
     notice = nextNotice
     setComments(null)
+  }
+
+  /** 异步链路里每个 await 之后都要问一句：我还是当前这一轮吗？ */
+  function isCurrentMatch(seq: number) {
+    return !detached && seq === matchSeq
   }
 
   function render() {
@@ -659,7 +687,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
     urlTip.classList.remove('is-error')
     urlTip.textContent = config.enabled
-      ? 'URL 来源和弹弹play可以同时生效；时间对不上时填偏移（秒）'
+      ? 'URL来源和弹弹play可同时生效；支持时间轴偏移'
       : '先打开上面的开关'
   }
 
@@ -868,23 +896,23 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   // ── 匹配动作 ────────────────────────────────────────────
 
   /**
-   * 弹幕就绪后让播放器重新取一次当前分段。
-   *
-   * 播放器按 cid 缓存分段，开关在播放中途打开时当前段早就取过了，
-   * 不会再发请求，hook 也就没机会合并。这里主动触发一次重新加载，
-   * 并把命中的方法名放进状态行，方便确认到底生效没有。
+   * 换集后给播放器 800ms 自己重发弹幕请求（它换 cid 时本来就会重拉），
+   * 看到了就清掉缓存提示。不再主动触发任何 seek/重载——那些方案都会
+   * 把播放位置挪走，用户明确要求删干净。
    */
   function reloadDanmaku() {
     if (reloading) return
     reloading = true
-    reloadHint = '正在让播放器重新加载弹幕…'
+    reloadHint = '正在等待弹幕重新加载…'
     render()
 
     void forceReloadDanmaku().then((method) => {
       reloading = false
-      reloadHint = method ? '' : '没能让播放器重新请求，刷新页面即可生效'
+      reloadHint = method
+        ? ''
+        : '改动已保存，之后的分段会自动生效；当前段要刷新页面才会重取'
       if (method) {
-        console.info('[danmaku-enhance] 已通过', method, '触发弹幕重新加载')
+        console.info('[danmaku-enhance]', method, '弹幕已重新加载')
       }
       render()
     })
@@ -894,6 +922,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     if (!config.enabled) return
     busy = true
     resetMatch('匹配中…')
+    const seq = matchSeq
     render()
 
     const task = (async () => {
@@ -903,9 +932,11 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
         // 走 6 候选关键词流程：命中即停，比整串搜索更容易命中
         const found = await findAnime(keyword, (msg) => {
+          if (!isCurrentMatch(seq)) return
           notice = msg
           if (opened) renderStatus()
         })
+        if (!isCurrentMatch(seq)) return
         tried = found.tried
 
         // 优先用记住的映射与精确同名，其次单条候选
@@ -919,6 +950,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
         busy = false
         render()
       } catch (error) {
+        if (!isCurrentMatch(seq)) return
         busy = false
         notice =
           error instanceof MatchError
@@ -936,7 +968,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
     setLoading(task.then(() => undefined, () => undefined))
     await task
-    setLoading(null)
+    if (isCurrentMatch(seq)) setLoading(null)
   }
 
   function autoPick(list: AnimeItem[]) {
@@ -956,6 +988,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   }
 
   async function pickAnime(item: AnimeItem, opts: { silent?: boolean } = {}) {
+    const seq = matchSeq
     busy = true
     notice = '读取集数…'
     anime = item
@@ -965,6 +998,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
     try {
       const list = await episodeList(item.id)
+      if (!isCurrentMatch(seq)) return
       if (!list.length) {
         busy = false
         notice = `「${item.name}」没有可用集数`
@@ -982,6 +1016,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       notice = ''
       render()
     } catch (error) {
+      if (!isCurrentMatch(seq)) return
       busy = false
       notice = `读取集数失败：${(error as Error)?.message || error}`
       anime = undefined
@@ -992,6 +1027,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   async function pickEpisode(ep: EpisodeItem, opts: { silent?: boolean } = {}) {
     const current = anime
     if (!current) return
+    const seq = matchSeq
     busy = true
     notice = `加载「${ep.name}」弹幕…`
     // 先把选集结果记下来：下拉框要立刻显示这一集，用户才看得出自动选了哪集、
@@ -1002,6 +1038,8 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
     try {
       const comments = await commentsOf(ep.id)
+      // 用户在这期间换了视频/换了集：这批弹幕属于上一页，丢掉
+      if (!isCurrentMatch(seq)) return
       if (!comments.length) {
         busy = false
         notice = `「${current.name}」${ep.name} 没有弹幕`
@@ -1015,9 +1053,13 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       setComments(comments)
       rememberMatch(currentInfo, current, ep)
       render()
+      // 匹配成功：左下角弹番剧名 + 条数，不用开面板也知道选对了哪部、有多少条。
+      // 条数把已挂上的 URL 来源也算进去，那才是「整集一共有多少条三方弹幕」。
+      announceMatch(current.name, ep.name, comments.length + getTotalCount())
       // 弹幕就绪：让播放器把当前分段重新取一遍，否则已缓存的分段不会经过 hook
       reloadDanmaku()
     } catch (error) {
+      if (!isCurrentMatch(seq)) return
       busy = false
       notice = `加载弹幕失败：${(error as Error)?.message || error}`
       render()
@@ -1031,6 +1073,10 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       render()
       return
     }
+    // 手动搜索也算一次新的匹配：先把序号推进，让在途的自动匹配作废，
+    // 否则它晚一步回来会把用户刚搜出来的候选列表盖掉。
+    matchSeq++
+    const seq = matchSeq
     busy = true
     notice = '搜索中…'
     candidateList = []
@@ -1042,6 +1088,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
     try {
       const found = await manualSearch(keyword)
+      if (!isCurrentMatch(seq)) return
       busy = false
       if (!found.length) {
         notice = '没有结果'
@@ -1056,6 +1103,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       matchTip.textContent = `「${keyword}」共 ${found.length} 条`
       render()
     } catch (error) {
+      if (!isCurrentMatch(seq)) return
       busy = false
       notice = `搜索失败：${(error as Error)?.message || error}`
       render()
@@ -1066,8 +1114,6 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   searchInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') void doSearch()
   })
-
-  filterReload.addEventListener('click', () => reloadDanmaku())
 
   // ── URL 来源 ────────────────────────────────────────────
   let adding = false
@@ -1102,6 +1148,26 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     renderStatus()
   })
 
+  /**
+   * 匹配成功时在播放器左下角弹两条提示，像第三方站点播放器进场那样：
+   * 一条番剧名 + 集名，一条「已加载 N 条第三方弹幕」。
+   *
+   * 触发点是「匹配成功」而不是「这一分段注入了」——
+   * 当前分段命中 0 条不代表整集没有弹幕，按分段算会让人以为没生效。
+   * 条数也用整集的总数。
+   */
+  function announceMatch(name: string, episodeName: string, count: number) {
+    if (detached) return
+    const title = [name, episodeName].filter(Boolean).join(' · ')
+    if (title) showToast(title, { key: 'title', duration: 4000 })
+    if (count > 0) {
+      showToast(`匹配成功，已加载 ${count} 条第三方弹幕`, {
+        key: 'count',
+        duration: 4000,
+      })
+    }
+  }
+
   // 播放器切全屏/宽屏会重建控制条，按钮被丢掉就重新挂回去。
   // 面板本身的位置不再跟着 DOM 变动走——那会让它在滚动时乱跳。
   //
@@ -1129,6 +1195,31 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   render()
 
   void (async () => {
+    // 挂载时先把「这真的属于当前 URL 的那条视频吗」验一遍。
+    //
+    // runtime 的 run() 在软跳转（点相关推荐）之后可能立刻执行，此时
+    // `__INITIAL_STATE__` 还是上一个视频的、DOM 标题也没刷，readPageInfo()
+    // 只能退回 readDomInfo() 拿到旧番名。老代码直接拿它去匹配，于是
+    // 「换视频仍然显示上一个视频的结果」——而且因为 currentVid 是在挂载时
+    // 读的（已经是新 bvid），checkPage 后面也发现不了差异。
+    // 这里在开始匹配之前先按 URL 上的 bvid 问一次接口。
+    if (currentVid && currentInfo.source !== 'video' && currentInfo.source !== 'bangumi') {
+      const fresh = await readVideoInfoByBvidAsync(currentVid).catch(() => undefined)
+      if (detached) return
+      if (fresh && fresh.seriesName && fresh.seriesName !== currentInfo.seriesName) {
+        console.info('[danmaku-enhance] 挂载时按 bvid 校正标题', {
+          bvid: currentVid,
+          from: currentInfo.seriesName,
+          to: fresh.seriesName,
+        })
+        currentInfo = fresh
+        currentPageKey = pageKeyOf(fresh)
+        searchInput.value = cleanTitle(fresh.seriesName)
+        setCid(fresh.cid)
+        setPageKey(currentPageKey)
+        render()
+      }
+    }
     await restoreSources()
     render()
     if (config.enabled) void ensureMatch()
@@ -1149,11 +1240,58 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     if (detached) return
     const next = readPageInfo()
     if (next.live) return
+
+    // 换视频要最先判断，而且只认 URL 上的 bvid。
+    // 点相关推荐是软跳转：URL 立刻变成新的 bvid，但 `__INITIAL_STATE__`
+    // 还是上一个视频的、`document.title` 也可能慢半拍。这时读到的
+    // seriesName/episode 全是旧的，靠它们比 key 会「看起来没变」。
+    const nextVid = readBvid()
+    if (nextVid && currentVid && nextVid !== currentVid) {
+      console.info('[danmaku-enhance] 检测到换视频', { from: currentVid, to: nextVid })
+      resetForPage(next, `vid:${nextVid}#${next.episode ?? ''}`, nextVid)
+      return
+    }
+
+    // 番剧页同理：URL 上变的是 ep_id，换集时标题和 `__playinfo__`
+    // 都可能还是上一集的。不单独比这一路，番剧切集永远发现不了。
+    const nextEp = readEpisodeId()
+    if (nextEp && currentEp && nextEp !== currentEp) {
+      console.info('[danmaku-enhance] 检测到换集（URL ep_id 路径）', {
+        from: currentEp,
+        to: nextEp,
+      })
+      resetForPage(next, pageKeyOf(next), nextVid)
+      return
+    }
+    if (nextEp !== currentEp) currentEp = nextEp
+
+    // cid 路径已经确认过换集（pageKey 是 `cid:xxx`，这是最可靠的信号）。
+    // 而 title/url 路径在运行时经常读不到分P（`__INITIAL_STATE__` 被 SPA
+    // 改写，episode 和 cid 都是空）。这时拿退化信息覆盖会把正确状态冲掉
+    // ——实测表现就是「toast 是第19话，面板却匹配成第18话」。
+    // 所以：cid 已知而读到的信息连 cid 都没有时，直接跳过，等 cid 路径更新。
+    if (currentPageKey.startsWith('cid:') && !next.cid && !next.episode) return
     const nextKey = pageKeyOf(next)
     if (nextKey === currentPageKey) return
 
+    console.info('[danmaku-enhance] 检测到页面变化（title/url 路径）', {
+      href: location.href,
+      from: currentPageKey,
+      to: nextKey,
+      episode: next.episode,
+      cid: next.cid,
+    })
+    resetForPage(next, nextKey, nextVid)
+  }
+
+  /** 换页面后的统一重置：面板状态、URL 源、播放器 cid 全部重新来一遍。 */
+  function resetForPage(next: BiliPageInfo, nextKey: string, nextVid: string | undefined) {
     currentInfo = next
     currentPageKey = nextKey
+    currentVid = nextVid
+    currentEp = readEpisodeId()
+    // 换视频了，上一条视频的轻提示没意义了，清掉
+    clearToast()
     searchInput.value = cleanTitle(next.seriesName)
     matchTip.textContent = ''
     resetMatch('')
@@ -1162,11 +1300,78 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     resetUrlSources()
     render()
     void (async () => {
+      // 软跳转到新视频时 `readPageInfo()` 给回的很可能是旧视频的标题
+      // （`__INITIAL_STATE__` 没重写、DOM 还没刷）。按 URL 上的 bvid
+      // 重新问一次接口，拿到真标题再匹配，否则会一直拿上一个视频去搜。
+      if (nextVid && next.source !== 'video' && next.source !== 'bangumi') {
+        const fresh = await readVideoInfoByBvidAsync(nextVid).catch(() => undefined)
+        if (detached) return
+        if (fresh && fresh.seriesName) {
+          console.info('[danmaku-enhance] 按 bvid 重新取到标题', {
+            bvid: nextVid,
+            title: fresh.seriesName,
+            episode: fresh.episode,
+          })
+          currentInfo = fresh
+          currentPageKey = pageKeyOf(fresh)
+          searchInput.value = cleanTitle(fresh.seriesName)
+          setCid(fresh.cid)
+          setPageKey(currentPageKey)
+          render()
+        }
+      }
       await restoreSources()
       render()
       if (config.enabled) void ensureMatch()
     })()
   }
+
+  /**
+   * 播放器请求的 cid 变了 = 真的换集了（切分P / 切集）。
+   *
+   * 这条路和 checkPage() 互补：checkPage 靠读页面信息，切分P 时
+   * `?p=` 不一定更新、`__INITIAL_STATE__` 也不会重写，于是它发现不了；
+   * 但播放器换集必须用新 cid 去请求弹幕，这个 cid 我们拦得到。
+   */
+  const unsubscribeCid = onCidChange((cid) => {
+    if (detached) return
+    void readVideoInfoByCidAsync(cid).then((next) => {
+      if (detached) return
+      if (!next) {
+        console.info('[danmaku-enhance] 播放器换了 cid，但 pages/接口都没找到', { cid })
+        return
+      }
+      const nextKey = pageKeyOf(next)
+      if (nextKey === currentPageKey) return
+
+      console.info('[danmaku-enhance] 检测到换集（cid 路径）', {
+        cid,
+        from: currentPageKey,
+        to: nextKey,
+        episode: next.episode,
+      })
+      currentInfo = next
+      currentPageKey = nextKey
+      // 换集也可能伴着换视频（合集里点下一集跳到别的 bvid），
+      // 这里顺手同步一次，避免 checkPage 拿旧的 bvid 再重置一遍
+      currentVid = readBvid()
+      currentEp = readEpisodeId()
+      clearToast()
+      searchInput.value = cleanTitle(next.seriesName)
+      matchTip.textContent = ''
+      resetMatch('')
+      setCid(cid)
+      setPageKey(nextKey)
+      // URL 源是挂在 cid 上的，换集后要跟着换
+      resetUrlSources()
+      render()
+      void (async () => {
+        await restoreSources()
+        render()
+        if (config.enabled) void ensureMatch()
+      })()
+    })
+  })
 
   let checkTimer: number | undefined
   function scheduleCheck() {
@@ -1187,6 +1392,25 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     characterData: true,
   })
   window.addEventListener('routechange', scheduleCheck)
+  window.addEventListener('popstate', scheduleCheck)
+
+  /**
+   * 直接盯 location.href。
+   *
+   * 前面几条路都可能哑火：站内切分P 时 title 不见得会改，而 B 站自己的
+   * router 如果在我们打补丁之前就把原生 pushState 存进了闭包，那
+   * runtime 包装出来的 routechange 也收不到。只有 location.href 一定会变
+   * ——切分P 的 URL 上带着 `?p=N`。
+   *
+   * 每 500ms 比一次字符串，代价可以忽略；发现变化再走 300ms 防抖那套完整流程。
+   */
+  let watchedHref = location.href
+  const urlWatch = window.setInterval(() => {
+    if (detached) return
+    if (location.href === watchedHref) return
+    watchedHref = location.href
+    scheduleCheck()
+  }, 500)
 
   // 打开面板时再核对一次：万一换视频时标题正好没变（少数软跳转），
   // 用户点开面板这个动作本身就是最好的检查时机。
@@ -1197,8 +1421,10 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       detached = true
       if (anchorTimer !== undefined) window.clearTimeout(anchorTimer)
       if (checkTimer !== undefined) window.clearTimeout(checkTimer)
+      window.clearInterval(urlWatch)
       titleWatch.disconnect()
       window.removeEventListener('routechange', scheduleCheck)
+      window.removeEventListener('popstate', scheduleCheck)
       document.removeEventListener('click', onDocumentClick, true)
       document.removeEventListener('mousedown', onDocumentMouseDown, true)
       window.removeEventListener('resize', onResize)
@@ -1207,6 +1433,8 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       if (replaceRaf) window.cancelAnimationFrame(replaceRaf)
       onBodyMutation.disconnect()
       unsubscribe()
+      unsubscribeCid()
+      disposeToast()
       button.remove()
       panel.remove()
     },
