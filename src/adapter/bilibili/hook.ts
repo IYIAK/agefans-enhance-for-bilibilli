@@ -66,6 +66,14 @@ interface HookStats {
   droppedNative: number
   /** 被合并掉的重复弹幕条数 */
   merged: number
+  /**
+   * 请求到达时我们手上一条候选都没有的次数（匹配还没跑完 / 根本没匹配上）。
+   *
+   * 为什么要单独计数：播放器按 cid 把分段缓存在内存里，错过了就不会重发。
+   * 之前面板用 `armed === 0` 判断这种情况，但开关是持久化的，刷新页面后
+   * 一开始就是开的，所有请求都算 armed，那个条件永远不成立。
+   */
+  missed: number
   /** 最近一次分段请求的生命周期（readyState/status/是否被中止/是否读了 response） */
   lastState: string
   /** response getter 的安装结果，装不上时这里写原因 */
@@ -164,6 +172,7 @@ function emptyStats(): HookStats {
     filtered: 0,
     droppedNative: 0,
     merged: 0,
+    missed: 0,
     lastState: '',
     hook: '',
   }
@@ -557,6 +566,9 @@ function buildInjections(
   // 即使一个候选都没有也要继续：过滤器要作用在原生弹幕上，
   // 「没有第三方弹幕」不等于「这段响应不用改」。
   state.stats.available = candidates.length
+  // 这一帧一条候选都没有 = 这一段是在我们准备好之前就被取走的，
+  // 播放器不会重发，只能刷新页面。面板据此提示「本段已缓存，刷新生效」。
+  if (!candidates.length) state.stats.missed++
   const result = pickComments(candidates, request, bytes, loadFilter())
   if (result.filtered) state.stats.filtered += result.filtered
   if (result.merged) state.stats.merged += result.merged

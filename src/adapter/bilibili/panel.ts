@@ -699,6 +699,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       `接管 ${stats.reads}`,
       `通道 xhr${stats.xhrs}/fetch${stats.fetches}`,
       `合并 ${stats.segments} 段/${stats.injected} 条`,
+      `错失 ${stats.missed} 段`,
       `过滤 ${stats.filtered} 条／合并重复 ${stats.merged} 条` +
         (stats.droppedNative ? `／密度裁剪 ${stats.droppedNative} 条` : ''),
       `段 ${stats.lastSeg ?? '-'}／合至 ${stats.lastMergedSeg ?? '-'}`,
@@ -752,13 +753,15 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
           : `已注入 ${stats.injected} 条（${stats.segments} 段）${
               extra ? `（${extra}）` : ''
             }`
-      } else if (stats.requests > 0 && stats.segments === 0 && stats.armed === 0) {
-        // 打开开关之前这一段就已经取走了，播放器把它缓存在内存里不会重发。
+      } else if (stats.requests > 0 && stats.segments === 0 && stats.missed > 0) {
+        // 有几段请求是在我们手上还没有候选弹幕的时候到的（匹配还没跑完，
+        // 或者这一段在开关打开前就被取走了），播放器把它们缓存在内存里
+        // 不会重发，只能刷新页面。
         //
-        // 这个判断必须排在 filtered 之前、也不能依赖 reads：手动选集时当前段
-        // 早就请求过了（requests>0 但 armed===0），而 reads 可能因为别的原因
-        // 有值，条件一多就会滑到最后那个「已接管请求」的兜底分支上，
-        // 于是用户明明处在该刷新的状态，却看不到任何提示。
+        // 这个判断必须排在 filtered 之前、也不能依赖 reads。之前这里用的是
+        // `armed === 0`，但开关是持久化的——刷新页面后一开始就是开的，
+        // 所有请求都算 armed，条件永远不成立，于是滑到最后那个「已接管请求」
+        // 的兜底分支上。
         statusSub.textContent = '本段已缓存，刷新生效'
         pageReloadBtn.hidden = false
       } else if (stats.filtered > 0 || stats.droppedNative > 0) {
