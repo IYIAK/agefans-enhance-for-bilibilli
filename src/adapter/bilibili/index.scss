@@ -153,6 +153,10 @@
   // overflow-y:auto 的滚动容器，自动最小尺寸是 0，会被压成一条缝——
   // 候选按钮全被裁掉，用户就以为「点了搜索没有结果可选」；输入框同理
   // 会被压成一行。统一禁止收缩，放不下就让 body 自己滚。
+  //
+  // 候选列表也必须在这一类里：它自己带 max-height 和 overflow，一旦允许
+  // 收缩，面板矮的时候它会被压到 0 高度、整块直接消失（用户报的「面板
+  // 一矮列表就没了」）。让它保持自己的高度，装不下由外层 body 滚。
   &__body > * {
     flex: 0 0 auto;
   }
@@ -545,8 +549,13 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    // 候选列表要能自己滚：不指定 flex-basis 时 body 的 `flex: 0 0 auto`
+    // 会把它撑到内容高，8 条候选直接把面板撑出 max-height，滚动条
+    // 出现在外层 body 上、行又被裁——看起来就是「不能滚动」。
     max-height: 200px;
+    min-height: 0;
     overflow-y: auto;
+    overscroll-behavior: contain;
 
     &[hidden] {
       display: none;
@@ -554,13 +563,25 @@
   }
 
   &__item {
+    // 列表是 flex column + max-height 内滚。子项默认 flex-shrink:1，
+    // 而 __item 自己带 overflow:hidden（为了让长标题出省略号），
+    // 带 overflow 的 flex 子项「自动最小尺寸」会算成 0——于是 8 条候选
+    // 全被压扁到 200px 里，每条只剩二十来像素高、字被自己裁掉半截，
+    // 而且因为「装得下」所以连滚动条都不出现。看起来就是「行高展示不全
+    // 且不能滚动」。禁止收缩，让列表真的溢出、真的滚。
+    flex: 0 0 auto;
+    display: block;
+    box-sizing: border-box;
     width: 100%;
-    padding: 4px 8px;
+    // B 站的全局 button 样式会把行高压到 1 上下，还带自己的 padding，
+    // 12px 的字被裁得只剩半截（用户报的「每个结果行高度展示不全」）
+    padding: 6px 10px;
     border: 1px solid transparent;
     border-radius: 4px;
     background: rgba(255, 255, 255, 0.06);
     color: #e5e7eb;
     font-size: 12px;
+    line-height: 1.5;
     text-align: left;
     cursor: pointer;
     overflow: hidden;
@@ -577,6 +598,12 @@
       background: rgba(251, 114, 153, 0.16);
       color: #fff;
     }
+  }
+
+  // 嵌套滚动：__body 在滚、__list 自己也在滚，鼠标在列表上滚动时
+  // 默认会先滚外层，列表顶到头也轮不到自己——显式把链路让给内层。
+  &__list {
+    overscroll-behavior: contain;
   }
 
   &__url {
@@ -601,6 +628,19 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+
+    // 白名单里的 UP 主名是链接（点了开主页）：去掉默认下划线，
+    // 只在悬停时提示可点，别让整块看起来像一堆超链接。
+    &--link {
+      text-decoration: none;
+      cursor: pointer;
+      pointer-events: auto;
+
+      &:hover {
+        color: #fb7299;
+        text-decoration: underline;
+      }
+    }
   }
 
   &__icon {

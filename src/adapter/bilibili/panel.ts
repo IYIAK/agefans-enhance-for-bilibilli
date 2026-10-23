@@ -269,7 +269,25 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   status.append(statusMain, statusSub, statusActions, debugBox)
 
   // URL 源
-  const urlTitle = el('div', `${ROOT_CLASS}__section`, 'URL 弹幕源')
+  // ── URL 弹幕源 ──────────────────────────────────────────
+  //
+  // 也是低频且占地方的区块（输入行 + 最多 3 条来源卡片 + 提示），
+  // 和「强制匹配UP主名单」「过滤器」一样默认收起，标题右侧给条数徽标。
+  const urlTitle = el(
+    'div',
+    `${ROOT_CLASS}__section ${ROOT_CLASS}__section--row`
+  )
+  urlTitle.append(el('span', undefined, 'URL 弹幕源'))
+  const urlCount = el('span', `${ROOT_CLASS}__fold-badge`)
+  urlTitle.append(urlCount)
+  const urlFold = el('button', `${ROOT_CLASS}__fold-btn`)
+  urlFold.type = 'button'
+  urlFold.title = '展开 URL 弹幕源'
+  urlFold.setAttribute('aria-expanded', 'false')
+  urlFold.innerHTML =
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m6 9 6 6 6-6"/></svg>'
+  urlTitle.append(urlFold)
+
   const urlInputRow = el('div', `${ROOT_CLASS}__row ${ROOT_CLASS}__row--input`)
   const urlInput = el('input', `${ROOT_CLASS}__input`) as HTMLInputElement
   urlInput.type = 'text'
@@ -279,6 +297,17 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
   const urlList = el('div', `${ROOT_CLASS}__list`)
   const urlTip = el('div', `${ROOT_CLASS}__tip`)
+
+  // 折叠体：输入行 / 来源列表 / 提示
+  const urlBody = el('div', `${ROOT_CLASS}__fold`)
+  urlBody.append(urlInputRow, urlList, urlTip)
+  urlBody.hidden = true
+  urlFold.addEventListener('click', () => {
+    urlBody.hidden = !urlBody.hidden
+    urlFold.classList.toggle('is-expanded', !urlBody.hidden)
+    urlFold.setAttribute('aria-expanded', String(!urlBody.hidden))
+    urlFold.title = urlBody.hidden ? '展开 URL 弹幕源' : '收起 URL 弹幕源'
+  })
 
   // ── UP 主白名单 ─────────────────────────────────────────
   //
@@ -352,6 +381,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   searchRow.append(searchInput, searchBtn)
 
   const candidates = el('div', `${ROOT_CLASS}__list`)
+  const candidatesTip = el('div', `${ROOT_CLASS}__tip`)
   const episodeSelect = el('select', `${ROOT_CLASS}__select`) as HTMLSelectElement
   const matchTip = el('div', `${ROOT_CLASS}__tip`)
 
@@ -511,13 +541,12 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     status,
     ddpTitle,
     searchRow,
+    candidatesTip,
     candidates,
     episodeSelect,
     matchTip,
     urlTitle,
-    urlInputRow,
-    urlList,
-    urlTip,
+    urlBody,
     whitelistTitle,
     whitelistBody,
     filterTitle,
@@ -793,12 +822,17 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       for (const item of whitelist) {
         const row = el('div', `${ROOT_CLASS}__url`)
         const head = el('div', `${ROOT_CLASS}__url-head`)
+        // 名字做成链接：名单是拿来核对「这个 UP 主是谁」的，光有名字和一个
+        // UID 提示不够用，点开主页最快。新标签页打开，不打断正在看的视频。
         const name = el(
-          'span',
-          `${ROOT_CLASS}__url-name`,
+          'a',
+          `${ROOT_CLASS}__url-name ${ROOT_CLASS}__url-name--link`,
           item.name || `UID ${item.mid}`
         )
-        name.title = `UID ${item.mid}`
+        name.href = `https://space.bilibili.com/${item.mid}`
+        name.target = '_blank'
+        name.rel = 'noopener noreferrer'
+        name.title = `UID ${item.mid}（点击打开主页）`
         const remove = el('button', `${ROOT_CLASS}__icon`, '×')
         remove.title = '移出白名单'
         remove.addEventListener('click', (e) => {
@@ -845,9 +879,12 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     // 放行过一次，新的这一集一进来就直接放行，扣留等于没配。
     setHold(true)
     // 这些都是上一集/上一个视频的残留：
-    // - lastHoldReason 还是旧文案，新页面会被判成「没变化」而一句话都不弹；
     // - userStarted 还留着 true，新页面一进来就 releaseHold，扣留等于没配。
-    lastHoldReason = ''
+    //   lastHoldReason 不在这里清：同页重入（syncForced 的早退分支会反复跑
+    //   这里）时把理由清空，会让 tickPause 下一次判定把它当成「原因变了」
+    //   重弹一条，把候选/失败分支刚弹的结论顶掉——这正是「toast 说要人选，
+    //   隔几秒自己变成未匹配到番剧」的来源。清空动作放在 resetForPage /
+    //   onCidChange（真换页）里做。
     userStarted = false
     forcedPageKey = currentPageKey
     // 白名单只提示这一次，后面「正在匹配番剧」「正在匹配集数」这些进度文案
@@ -929,6 +966,11 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     if (!forced || detached) return
     // 能放弹幕了就别按了：成功由 pickEpisode 的 resumeIfWePaused 负责恢复播放
     if (matchReady()) return
+    // 匹配已经有结论（成功/失败/要人选都算）：文案由 settleForced、
+    // 候选分支负责，监视别再插话——不然 beginForced 同页重入后监视会把
+    // 候选分支的「请手动选择番剧名」改写成「未匹配到番剧，请手动选择」，
+    // 用户看到 toast 自己变来变去。
+    if (matchSettled) return
     // 用户自己动过播放器 = 他不想等，让位
     if (userStarted) {
       releaseHold()
@@ -1281,16 +1323,17 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     candidates.textContent = ''
     if (!candidateList.length) {
       candidates.hidden = true
+      // 说明文字跟着列表一起藏：没有候选时那句「请选择」没有意义
+      candidatesTip.hidden = true
       return
     }
     candidates.hidden = false
-    candidates.append(
-      el(
-        'div',
-        `${ROOT_CLASS}__tip`,
-        anime ? '换一部：' : '找到多部可能匹配的番剧，请选择：'
-      )
-    )
+    candidatesTip.hidden = false
+    // 说明文字放在滚动列表外面：它不该占列表的 200px 高度（8 条候选时
+    // 里面的可视行数会因此少一行），也不用跟着滚。
+    candidatesTip.textContent = anime
+      ? '换一部：'
+      : '找到多部可能匹配的番剧，请选择：'
     for (const item of candidateList) {
       const row = el('button', `${ROOT_CLASS}__item`, item.name)
       row.title = item.name
@@ -1331,6 +1374,9 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
   function renderUrls() {
     const entries = getEntries()
+    // 折叠时也要看得出有几条来源：徽标和「强制匹配UP主名单」同款
+    urlCount.textContent = entries.length ? String(entries.length) : ''
+    urlCount.hidden = !entries.length
     urlList.textContent = ''
     if (!entries.length) {
       urlList.append(el('div', `${ROOT_CLASS}__tip`, '还没有 URL 来源（最多 3 条）'))
@@ -1466,15 +1512,17 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
           })
           return
         }
+        // 有候选但要人来选：这一轮匹配到头了。把 settled 置上，白名单的
+        // 暂停监视（tickPause）就不再抢话筒——之前这里弹完「请手动选择番剧名」，
+        // 200ms 后 tickPause 又用「正在匹配番剧」把这条 toast 顶掉，等它
+        // 8 秒超时消失，屏幕上就什么都不剩了（用户报的「没匹配成功没有 toast」）。
+        // 扣留不放开：选完集数才由 pickEpisode 放行。
+        matchSettled = true
         notice = '请手动选择番剧名'
         render()
-        // 有候选但要人来选：白名单页面上继续按着，同时明确告诉他要选哪部
         if (forced) {
           lastHoldReason = '请手动选择番剧名'
-          showToast(lastHoldReason, {
-            key: 'hold',
-            duration: 8000,
-          })
+          showToast(lastHoldReason, { key: 'hold', duration: 8000 })
         }
       } catch (error) {
         if (!isCurrentMatch(seq)) return
@@ -1885,6 +1933,9 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     searchInput.value = cleanTitle(next.seriesName)
     matchTip.textContent = ''
     resetMatch('')
+    // 真换页才清「上次弹过的理由」：新页面要重新说一遍为什么按住。
+    // 同页重入（beginForced 被 syncForced 反复调用）不清，见 beginForced 注释。
+    lastHoldReason = ''
     setCid(next.cid)
     setPageKey(nextKey)
     resetUrlSources()
@@ -1961,6 +2012,8 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       searchInput.value = cleanTitle(next.seriesName)
       matchTip.textContent = ''
       resetMatch('')
+      // 换集/切分P 也是真换页：新的一集要重新说明「为什么按住」。
+      lastHoldReason = ''
       setCid(cid)
       setPageKey(nextKey)
       // URL 源是挂在 cid 上的，换集后要跟着换
