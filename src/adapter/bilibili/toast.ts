@@ -39,12 +39,20 @@ export interface ToastOptions {
   key?: string
   /** 显示时长（毫秒） */
   duration?: number
+  /**
+   * 提示右侧的可点按钮（如「确认」）。带 action 的提示不会自动淡出，
+   * 必须由调用方在动作完成后用 clearToast(key) 收掉——
+   * 「等待用户确认」这类提示定时消失会让按钮跟着消失，确认就落空了。
+   */
+  action?: { label: string; onClick: () => void }
 }
 
 interface ToastItem {
   key: string
   node: HTMLDivElement
   hideTimer?: number
+  /** 点击处理器要随 item 一起换掉，否则同 key 更新后触发的是旧的回调 */
+  action?: { label: string; onClick: () => void }
 }
 
 let host: HTMLDivElement | null = null
@@ -144,7 +152,7 @@ function removeItem(item: ToastItem) {
   }, 220)
 }
 
-function createItem(text: string): ToastItem {
+function createItem(text: string, action?: { label: string; onClick: () => void }): ToastItem {
   const node = el('div', ITEM_CLASS)
   const icon = el('span', `${ROOT_CLASS}__icon`)
   icon.innerHTML =
@@ -152,7 +160,16 @@ function createItem(text: string): ToastItem {
   const label = el('span', `${ROOT_CLASS}__text`)
   label.textContent = text
   node.append(icon, label)
-  return { key: text, node }
+  if (action) {
+    // pointer-events 要在这里重新打开：宿主容器整体是 none，
+    // 不开的话按钮看得见点不着。
+    const btn = el('button', `${ROOT_CLASS}__action`)
+    btn.type = 'button'
+    btn.textContent = action.label
+    btn.addEventListener('click', () => action.onClick())
+    node.append(btn)
+  }
+  return { key: text, node, action }
 }
 
 /**
@@ -172,12 +189,23 @@ export function showToast(text: string, options: ToastOptions | number = {}) {
   if (item) {
     const label = item.node.querySelector(`.${ROOT_CLASS}__text`)
     if (label) label.textContent = text
+    // 按钮跟着 action 换：旧节点直接重建，比逐字段 patch 简单且不会残留监听
+    const oldBtn = item.node.querySelector(`.${ROOT_CLASS}__action`)
+    if (oldBtn) oldBtn.remove()
+    if (opts.action) {
+      const btn = el('button', `${ROOT_CLASS}__action`)
+      btn.type = 'button'
+      btn.textContent = opts.action.label
+      btn.addEventListener('click', () => opts.action!.onClick())
+      item.node.append(btn)
+    }
+    item.action = opts.action
     if (item.hideTimer !== undefined) {
       window.clearTimeout(item.hideTimer)
       item.hideTimer = undefined
     }
   } else {
-    item = createItem(text)
+    item = createItem(text, opts.action)
     item.key = key
     root.append(item.node)
     items.push(item)
@@ -196,18 +224,34 @@ export function showToast(text: string, options: ToastOptions | number = {}) {
   void target.node.offsetWidth
   target.node.classList.add('is-visible')
 
-  target.hideTimer = window.setTimeout(() => {
-    target.hideTimer = undefined
-    items = items.filter((o) => o !== target)
-    removeItem(target)
-  }, duration)
+  // 带 action 的提示常驻到调用方主动 clearToast，定时消失会让确认落空
+  if (!opts.action) {
+    target.hideTimer = window.setTimeout(() => {
+      target.hideTimer = undefined
+      items = items.filter((o) => o !== target)
+      removeItem(target)
+    }, duration)
+  }
 }
 
-/** 一次性清掉所有提示（换视频时用） */
-export function clearToast() {
-  const list = items
-  items = []
-  list.forEach((item) => removeItem(item))
+/**
+ * 清掉提示。
+ *
+ * - 不带参数：全清（换视频时用）
+ * - 带 key：只清那一条（白名单的暂停说明用得上——匹配成功后要把它收掉，
+ *   否则「已暂停」会一直挂在画面上，跟已经播起来的视频自相矛盾）
+ */
+export function clearToast(key?: string) {
+  if (key === undefined) {
+    const list = items
+    items = []
+    list.forEach((item) => removeItem(item))
+    return
+  }
+  const target = items.find((o) => o.key === key)
+  if (!target) return
+  items = items.filter((o) => o !== target)
+  removeItem(target)
 }
 
 /** 面板销毁时一并清掉，避免留下孤儿节点和监听 */

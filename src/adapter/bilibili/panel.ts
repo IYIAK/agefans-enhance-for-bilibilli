@@ -17,7 +17,9 @@ import {
 import type { BiliPageInfo } from './info'
 import {
   forceReloadDanmaku,
+  getComments,
   getStats,
+  isStaleSegment,
   onCidChange,
   releaseHold,
   setCid,
@@ -256,7 +258,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   const pageReloadBtn = el('button', `${ROOT_CLASS}__status-reload`)
   pageReloadBtn.type = 'button'
   pageReloadBtn.hidden = true
-  pageReloadBtn.title = '这一段在打开开关前就取走了，播放器不会重发；点这里刷新页面'
+  pageReloadBtn.title = '本段弹幕已按之前的结果缓存，播放器不会重发；点这里刷新页面'
   pageReloadBtn.innerHTML =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
     'stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/>' +
@@ -291,9 +293,19 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     'div',
     `${ROOT_CLASS}__section ${ROOT_CLASS}__section--row`
   )
-  whitelistTitle.append(el('span', undefined, '强制匹配'))
+  whitelistTitle.append(el('span', undefined, '强制匹配UP主名单'))
   const whitelistCount = el('span', `${ROOT_CLASS}__fold-badge`)
   whitelistTitle.append(whitelistCount)
+  // 折叠箭头与过滤器同款：白名单是低频操作（加一两个 UP 主就再也不动），
+  // 常驻展开只会把「弹弹play匹配」和「URL 弹幕源」挤到很深的滚动区里。
+  // 标题右侧的计数徽标（__fold-badge）在折叠时仍然可见，条数一目了然。
+  const whitelistFold = el('button', `${ROOT_CLASS}__fold-btn`)
+  whitelistFold.type = 'button'
+  whitelistFold.title = '展开名单管理'
+  whitelistFold.setAttribute('aria-expanded', 'false')
+  whitelistFold.innerHTML =
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m6 9 6 6 6-6"/></svg>'
+  whitelistTitle.append(whitelistFold)
 
   const whitelistRow = el('div', `${ROOT_CLASS}__row ${ROOT_CLASS}__row--input`)
   const whitelistInput = el('input', `${ROOT_CLASS}__input`) as HTMLInputElement
@@ -302,15 +314,28 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   const whitelistAddBtn = el('button', `${ROOT_CLASS}__mini`, '添加')
   whitelistRow.append(whitelistInput, whitelistAddBtn)
 
-  const whitelistSelfBtn = el(
-    'button',
-    `${ROOT_CLASS}__minor`,
-    '把当前视频的 UP 主加进来'
-  )
+  const whitelistSelfBtn = el('button', `${ROOT_CLASS}__minor`)
   whitelistSelfBtn.type = 'button'
+  whitelistSelfBtn.title = '把当前视频的 UP 主加进白名单'
+  // 前面加个加号图标：让「这一整行是个按钮」一眼能看出来，
+  // 纯文字虚线框容易被当成提示文案而不是可点的东西。
+  whitelistSelfBtn.innerHTML =
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 5v14M5 12h14"/></svg>' +
+    '<span>添加当前视频up主</span>'
 
   const whitelistList = el('div', `${ROOT_CLASS}__list`)
   const whitelistTip = el('div', `${ROOT_CLASS}__tip`)
+
+  // 白名单默认收起，整块内容（输入行 / 添加当前 UP 主 / 名单 / 提示）都在折叠体里
+  const whitelistBody = el('div', `${ROOT_CLASS}__fold`)
+  whitelistBody.append(whitelistRow, whitelistSelfBtn, whitelistList, whitelistTip)
+  whitelistBody.hidden = true
+  whitelistFold.addEventListener('click', () => {
+    whitelistBody.hidden = !whitelistBody.hidden
+    whitelistFold.classList.toggle('is-expanded', !whitelistBody.hidden)
+    whitelistFold.setAttribute('aria-expanded', String(!whitelistBody.hidden))
+    whitelistFold.title = whitelistBody.hidden ? '展开名单管理' : '收起名单管理'
+  })
 
   // 弹弹play
   // 这里原来有「重新匹配」「换番剧」两个按钮，语义和下面这排搜索完全重叠：
@@ -484,11 +509,6 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     switchRow,
     dedupeRow,
     status,
-    whitelistTitle,
-    whitelistRow,
-    whitelistSelfBtn,
-    whitelistList,
-    whitelistTip,
     ddpTitle,
     searchRow,
     candidates,
@@ -498,6 +518,8 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     urlInputRow,
     urlList,
     urlTip,
+    whitelistTitle,
+    whitelistBody,
     filterTitle,
     filterBody
   )
@@ -733,7 +755,21 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   let forced = false
   /** 是我们把视频按住的（用户自己暂停的不算，也就不能替他恢复） */
   let pausedByUs = false
-  let pauseTimer: number | undefined
+  /** 用户自己动过播放器：强制匹配让位，别再暂停他 */
+  let userStarted = false
+  /** 播放是我们自己发起的那一次 play（别把它当成用户想绕过匹配） */
+  let selfResuming = false
+  /**
+   * 最近一次「真的由人做出来」的操作时刻。
+   *
+   * `play` 事件本身分不清是谁让它播的：用户点播放、播放器自动播放、
+   * 我们自己调 `video.play()` 都会触发，`isTrusted` 也全是 true。
+   * 只有输入事件（pointerdown / keydown）能标出人的动作，所以用它给
+   * play 定性。窗口取 1.5 秒：点了到真正开播之间会隔一会儿。
+   */
+  let userGestureAt = 0
+  /** `beginForced()` 这次是按哪个页面做的，避免同一页被重做两遍 */
+  let forcedPageKey = ''
   let resumeTimer: number | undefined
 
   function isWhitelisted(mid?: number) {
@@ -786,25 +822,76 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
    *
    * 只认 mid：按名字搜人的接口实测 412（要 cookie + wbi 签名），
    * 名字既无法校验也没法比对。
+   *
+   * 拿不到 UP 主时要重试：`resolveOwner()` 在软跳转刚发生时可能既读不到
+   * `__INITIAL_STATE__.videoData.owner`（还是上一个视频的，被 bvid 校验挡掉），
+   * 接口也可能正好抖一下。只判一次的话结论就永久停在「不在白名单」——
+   * 用户看到的正是「有的白名单视频不暂停，也不匹配」。
    */
-  async function syncForced() {
+  let forcedSeq = 0
+
+  /**
+   * 真正「开始按住」这件事的全部动作。
+   *
+   * 抽出来是因为结论和动作必须一起重做：换集、切分P、点相关推荐之后，
+   * 上一页的扣留、暂停监视、提示态全部作废了，而白名单结论往往**没变**
+   * （还是同一个 UP 主）。早先 `syncForced()` 把「结论没变」当成
+   * 「什么都不用做」直接 return，于是换页之后一次都没重新按住——
+   * 用户看到的就是「白名单 UP 主切分P / 点相关推荐不暂停」。
+   */
+  function beginForced() {
     if (detached) return
-    const owner = await resolveOwner().catch(() => undefined)
+    // setHold 会把上一轮的 holdReleased 清掉。不清的话，上一集匹配成功时
+    // 放行过一次，新的这一集一进来就直接放行，扣留等于没配。
+    setHold(true)
+    // 这些都是上一集/上一个视频的残留：
+    // - lastHoldReason 还是旧文案，新页面会被判成「没变化」而一句话都不弹；
+    // - userStarted 还留着 true，新页面一进来就 releaseHold，扣留等于没配。
+    lastHoldReason = ''
+    userStarted = false
+    forcedPageKey = currentPageKey
+    // 白名单只提示这一次，后面「正在匹配番剧」「正在匹配集数」这些进度文案
+    // 都不再带「白名单」前缀。每换一页重新说一遍，是为了让用户知道
+    // 「这次暂停是名单造成的」，而不是以为播放器坏了。
+    showToast('当前 UP 主在强制匹配名单：匹配完成前暂停播放', {
+      key: 'hold-tip',
+      duration: 8000,
+    })
+    // 注意不要动 pausedByUs：同一个视频切分P 时我们可能正按着它，
+    // 清成 false 会让匹配成功后 `resumeIfWePaused()` 直接早退，视频永远停着。
+    // startPauseWatch 里会立刻跑一次 tickPause，「一秒都不播」靠的就是这一下
+    startPauseWatch()
+  }
+
+  async function syncForced(): Promise<void> {
     if (detached) return
+    const seq = ++forcedSeq
+
+    let owner = await resolveOwner().catch(() => undefined)
+    for (let attempt = 0; !owner && attempt < 3 && !detached; attempt++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 800))
+      if (detached || seq !== forcedSeq) return
+      owner = await resolveOwner().catch(() => undefined)
+    }
+    if (detached || seq !== forcedSeq) return
+
     const nextForced = isWhitelisted(owner?.mid)
     if (nextForced === forced) {
-      // 白名单本身变了（加了/删了），即使当前页面结论没变也要重绘
+      // 白名单本身变了（加了/删了），即使当前页面结论没变也要重绘。
+      // 结论还是「要按住」时不能只重绘就完事：换页已经把上一页的扣留和
+      // 暂停监视作废了（见 beginForced 的注释），必须重新建立一遍。
       renderWhitelist()
+      if (forced) beginForced()
       return
     }
     forced = nextForced
     setHold(forced)
     renderWhitelist()
     if (forced) {
-      schedulePause()
+      beginForced()
     } else {
       // 退出强制匹配：把我们按住的视频放开，别留着用户一个暂停的画面
-      cancelPause()
+      stopPauseWatch()
       releaseHold()
       resumeIfWePaused()
     }
@@ -813,37 +900,73 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   /**
    * 白名单页面上「匹配没出结果就先暂停」。
    *
-   * 等 1 秒才动手：绝大多数视频 1 秒内就匹配好了（实测弹弹play 通常
-   * 一次往返），这种情况下暂停再恢复反而闪一下，体验更差。
+   * 要求是「一秒都不播」：一进页面就按住，匹配出结果才放。所以这里是
+   * 每 200ms 的持续观察，而不是「等一会儿再检查一次」——播放器可能在
+   * 任何时候自己开始播（自动播放、续播），按得不及时就等于没按。
    */
-  function schedulePause() {
-    cancelPause()
-    pauseTimer = window.setTimeout(() => {
-      pauseTimer = undefined
-      if (!forced || detached) return
-      // 已经匹配好了就别按了
-      if (anime && episode) return
-      const video = findOne<HTMLVideoElement>(['video'])
-      if (!video) return
-      if (video.paused) return
+  let pauseWatch: number | undefined
+  /** 上一次弹出的「为什么停住」，避免每 200ms 重弹把提示永久钉在屏幕上 */
+  let lastHoldReason = ''
+
+  function startPauseWatch() {
+    stopPauseWatch()
+    pauseWatch = window.setInterval(tickPause, 200)
+    tickPause()
+  }
+
+  function stopPauseWatch() {
+    if (pauseWatch === undefined) return
+    window.clearInterval(pauseWatch)
+    pauseWatch = undefined
+  }
+
+  /** 能不能放弹幕了：番名和集数都定下来才叫定下来 */
+  function matchReady() {
+    return !!anime && !!episode
+  }
+
+  function tickPause() {
+    if (!forced || detached) return
+    // 能放弹幕了就别按了：成功由 pickEpisode 的 resumeIfWePaused 负责恢复播放
+    if (matchReady()) return
+    // 用户自己动过播放器 = 他不想等，让位
+    if (userStarted) {
+      releaseHold()
+      return
+    }
+    const video = findOne<HTMLVideoElement>(['video'])
+    if (!video) return
+
+    // 暂停和提示一起做，每一轮都跑：文案随匹配进展变化（同 key 会就地更新，
+    // 不会堆成一片），这样「为什么停住」始终是屏幕上最新的那一句。
+    if (!video.paused) {
       pausedByUs = true
       try {
         video.pause()
       } catch {
         pausedByUs = false
       }
-    }, 1000)
-  }
-
-  function cancelPause() {
-    if (pauseTimer !== undefined) {
-      window.clearTimeout(pauseTimer)
-      pauseTimer = undefined
+    }
+    const reason = matchSettled
+      ? anime
+        ? `已匹配「${anime.name}」，请手动选择集数`
+        : '未匹配到番剧，请手动选择'
+      : anime
+        ? '正在匹配集数'
+        : '正在匹配番剧'
+    // 同一条原因只在变化时弹一次：每 200ms 重弹会把 duration 一直往后推，
+    // 提示就永远挂在屏幕上了。
+    if (reason !== lastHoldReason) {
+      lastHoldReason = reason
+      showToast(reason, { key: 'hold', duration: 8000 })
     }
   }
 
   /** 匹配成功后把我们自己按下的视频放开 */
   function resumeIfWePaused() {
+    stopPauseWatch()
+    clearToast('hold')
+    clearToast('hold-tip')
     if (!pausedByUs) return
     pausedByUs = false
     if (resumeTimer !== undefined) window.clearTimeout(resumeTimer)
@@ -853,9 +976,53 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       if (detached) return
       const video = findOne<HTMLVideoElement>(['video'])
       if (!video || !video.paused) return
-      const played = video.play()
-      if (played && typeof played.catch === 'function') played.catch(() => undefined)
+      // 这一下是我们自己按的播放键，onVideoPlay 里别把它当成用户想绕过匹配
+      selfResuming = true
+      try {
+        const played = video.play()
+        if (played && typeof played.catch === 'function') {
+          played.catch(() => undefined)
+        }
+      } finally {
+        // play() 是同步返回 Promise，play 事件可能在之后才到；留一帧给它
+        window.setTimeout(() => {
+          selfResuming = false
+        }, 0)
+      }
     }, 300)
+  }
+
+  /**
+   * 这一轮匹配确定拿不到能注入的弹幕了（这集真没弹幕、番剧没有集数列表、
+   * 搜索彻底失败、或者要人来选）。
+   *
+   * 白名单页面**什么都不放**：扣留没有超时，只有用户手动点播放才放行
+   * （`onVideoPlay()` 里的 `releaseHold()`）。这里要是放掉，播放器就会
+   * 把「只有原生弹幕」的那一段缓存进内存，之后再选对集也救不回来——
+   * 那正是白名单要防的事。
+   *
+   * 非白名单没有扣留这回事，调一下 `releaseHold()` 只是把标志位归位。
+   */
+  function giveUpHold() {
+    matchSettled = true
+    if (forced) return
+    releaseHold()
+  }
+
+  /**
+   * 白名单页面上「匹配这条路走到头了」的收尾：放开扣住的响应 + 保持暂停 +
+   * 用 toast 把结论说清楚。
+   *
+   * 非白名单页面**不弹**：那里没有强制暂停，匹配失败只是面板里一句话，
+   * 突然在屏幕上弹一条失败提示反而打扰。
+   */
+  function settleForced(reason: string) {
+    giveUpHold()
+    if (!forced) return
+    // 同一条原因不重复弹（下拉框点几次就会走几次这里）
+    if (reason === lastHoldReason) return
+    lastHoldReason = reason
+    showToast(reason, { key: 'hold', duration: 8000 })
   }
 
   /**
@@ -866,9 +1033,21 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
    */
   function onVideoPlay() {
     if (!forced) return
+    // 我们自己恢复播放的那一次，别当成用户想绕过匹配
+    if (selfResuming) return
+    // `play` 事件分不清是谁让它播的：用户点播放、播放器自动续播、我们刚
+    // 暂停它又自己起来，全都长一个样（`isTrusted` 也全是 true）。
+    // 之前用 `pausedByUs` 当判据是错的——只要是我们按下的，播放器随后
+    // 自己重试一次播放就会被记成「用户想播」，于是立刻 releaseHold，
+    // 白名单彻底失效（用户报的「toast 闪几下就没了、视频照播」）。
+    // 现在只认真正的输入动作：play 之前 1.5 秒内有过 pointerdown/keydown。
+    if (Date.now() - userGestureAt > 1500) return
+    userStarted = true
     pausedByUs = false
     releaseHold()
-    cancelPause()
+    stopPauseWatch()
+    clearToast('hold')
+    clearToast('hold-tip')
   }
 
   function addWhitelistByMid(mid: number) {
@@ -915,7 +1094,15 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       })
   })
 
-  // 用户点播放就放行。用捕获阶段，且只关心真正的 play（不是 seek 引起的）
+  // 用户点播放就放行。用捕获阶段，且只关心真正的 play（不是 seek 引起的）。
+  //
+  // 光靠 play 事件判不出「是不是人点的」，所以额外记下最近的输入事件
+  // 当证据（见 `onVideoPlay` 与 `userGestureAt` 的注释）。
+  function markGesture() {
+    userGestureAt = Date.now()
+  }
+  document.addEventListener('pointerdown', markGesture, true)
+  document.addEventListener('keydown', markGesture, true)
   document.addEventListener('play', onVideoPlay, true)
 
   // ── 匹配状态 ────────────────────────────────────────────
@@ -926,6 +1113,8 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   let tried: string[] = []
   let notice = ''
   let busy = false
+  /** 这一轮匹配已经有结论了（成功或失败都算），白名单的暂停监视靠它收手 */
+  let matchSettled = false
   let reloadHint = ''
   let reloading = false
   // 匹配序号：每重置一次就 +1，异步链路在每个 await 之后核对。
@@ -936,6 +1125,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
   function resetMatch(nextNotice = '') {
     matchSeq++
+    matchSettled = false
     anime = undefined
     episode = undefined
     candidateList = []
@@ -964,9 +1154,19 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       : '先打开上面的开关'
   }
 
+  /**
+   * 「选了集但这一段没注入」的提示统一带上整集弹幕总数：
+   * 弹弹play 已加载的集数弹幕 + 各 URL 来源的全部条目，
+   * 口径与成功时的 announceMatch 一致。数据没就绪时不加尾巴。
+   * 括号内容放第二行：状态行宽度有限，连着排会折成难看的三行。
+   */
+  function withTotal(base: string) {
+    const total = (getComments()?.length ?? 0) + getTotalCount()
+    return total ? `${base}\n弹幕已就绪：共 ${total} 条` : base
+  }
+
   /** 「详情」里展开的技术细节 */
-  function debugLine(stats: ReturnType<typeof getStats>) {
-    const parts = [
+  function debugLine(stats: ReturnType<typeof getStats>) {    const parts = [
       `请求 ${stats.requests}`,
       `开闸 ${stats.armed}`,
       `接管 ${stats.reads}`,
@@ -1019,7 +1219,15 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       ]
         .filter(Boolean)
         .join(' · ')
-      if (stats.injected > 0) {
+      if (isStaleSegment()) {
+        // 重选集数：已注入的分段是按旧候选合并进播放器的（候选代数已前进、
+        // 注入还没追平），新候选只对之后的分段生效——明说刷新生效，
+        // 别让用户以为重选没成功。必须排在「已注入 N 条」前面：
+        // 旧集数的注入计数还在 stats 里，不抢先判断的话状态行会一直
+        // 显示旧数据，看起来像重选没生效（toast 却说了切换集数，自相矛盾）。
+        statusSub.textContent = withTotal('本段为切换集数前的弹幕，刷新后生效')
+        pageReloadBtn.hidden = false
+      } else if (stats.injected > 0) {
         statusSub.textContent = stats.available
           ? `本次共 ${stats.available} 条，已注入 ${stats.injected} 条${
               extra ? `（${extra}）` : ''
@@ -1036,7 +1244,15 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
         // `armed === 0`，但开关是持久化的——刷新页面后一开始就是开的，
         // 所有请求都算 armed，条件永远不成立，于是滑到最后那个「已接管请求」
         // 的兜底分支上。
-        statusSub.textContent = '本段已缓存，刷新生效'
+        //
+        // 弹幕本身是拿到了的（状态行主文案就是番名·集名），所以把整集的
+        // 第三方弹幕总数也带上一句：用户不会误以为「一条弹幕都没找到」。
+        // 总数 = 弹弹play 已加载的集数弹幕 + 各 URL 来源的全部条目，
+        // 与成功时的 announceMatch 口径一致。
+        const total = (getComments()?.length ?? 0) + getTotalCount()
+        statusSub.textContent = total
+          ? `本段已缓存，刷新生效\n弹幕已就绪：共 ${total} 条`
+          : '本段已缓存，刷新生效'
         pageReloadBtn.hidden = false
       } else if (stats.filtered > 0 || stats.droppedNative > 0) {
         statusSub.textContent = `当前分段没有可注入的弹幕，过滤器已作用在原生弹幕上（过滤 ${
@@ -1045,16 +1261,16 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       } else if (stats.requests === 0) {
         statusSub.textContent = '等待播放器请求弹幕…'
       } else if (stats.reads === 0) {
-        statusSub.textContent = '已拦截请求，但还没有接管到响应'
+        statusSub.textContent = withTotal('已拦截请求，但还没有接管到响应')
       } else {
-        statusSub.textContent = '已接管请求，当前分段没有可注入的弹幕'
+        statusSub.textContent = withTotal('已接管请求，当前分段没有可注入的弹幕')
       }
       debugBox.textContent = debugLine(stats)
       return
     }
     if (anime) {
       statusMain.textContent = anime.name
-      statusSub.textContent = '请选择集数'
+      statusSub.textContent = '请手动选择集数'
       return
     }
     statusMain.textContent = '等待匹配'
@@ -1209,7 +1425,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     const task = (async () => {
       try {
         const keyword = cleanTitle(currentInfo.seriesName)
-        if (!keyword) throw new MatchError('没识别到当前视频的标题')
+        if (!keyword) throw new MatchError('未识别到当前视频的标题')
 
         // 走 6 候选关键词流程：命中即停，比整串搜索更容易命中
         const found = await findAnime(keyword, (msg) => {
@@ -1227,9 +1443,39 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
           return
         }
         candidateList = found.animes.slice(0, 8)
-        notice = '请选择番剧'
         busy = false
+        // 唯一命中但相似度低（别名收录的番剧）：不自动选中，把决定权交给
+        // 用户，但确认动作直接放在左下角 toast 上，不用打开面板。
+        // 只有一条候选时面板列表就没必要再铺一遍。
+        if (found.needsConfirm && candidateList.length === 1) {
+          const item = candidateList[0]
+          notice = `找到唯一匹配「${item.name}」，请确认`
+          matchSettled = true
+          render()
+          showToast(`找到唯一匹配「${item.name}」，请确认是否正确`, {
+            key: 'hold',
+            duration: 8000,
+            action: {
+              label: '确认',
+              onClick: () => {
+                if (detached) return
+                clearToast('hold')
+                void pickAnime(item, { silent: true })
+              },
+            },
+          })
+          return
+        }
+        notice = '请手动选择番剧名'
         render()
+        // 有候选但要人来选：白名单页面上继续按着，同时明确告诉他要选哪部
+        if (forced) {
+          lastHoldReason = '请手动选择番剧名'
+          showToast(lastHoldReason, {
+            key: 'hold',
+            duration: 8000,
+          })
+        }
       } catch (error) {
         if (!isCurrentMatch(seq)) return
         busy = false
@@ -1241,8 +1487,12 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
           tried = error.context.tried
           candidateList = error.context.animes.slice(0, 8)
           matchTip.textContent =
-            '弹弹play搜索是纯子串匹配、最多 25 条且不翻页。可以直接用下面的搜索框改词重试。'
+            '弹弹play按番剧名子串检索，单次最多返回 25 条且按编号排序、不提供分页；若未命中，可在上方搜索框换用更准确的关键词重试。'
         }
+        // 这一轮匹配彻底失败：白名单的暂停监视收手，否则用户会一直瞪着
+        // 暂停画面等一个永远不会来的结果。白名单页面还要说清楚为什么
+        // 没自动播起来——否则画面停着、一句话都没有，看不出是脚本干的。
+        settleForced('未匹配到番剧，请手动选择')
         render()
       }
     })()
@@ -1287,8 +1537,9 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       if (!isCurrentMatch(seq)) return
       if (!list.length) {
         busy = false
-        notice = `「${item.name}」没有可用集数`
+        notice = '该番剧没有可用集数'
         anime = undefined
+        settleForced('该番剧没有可用集数')
         render()
         return
       }
@@ -1300,12 +1551,21 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       }
       busy = false
       notice = ''
+      // 番名对上了、集数没对上：这就到终点了，等用户自己选。
+      // 白名单页面靠这个标记把提示从「正在匹配集数」改成「请手动选择集数」，
+      // 否则用户看到的是永远在转圈的一句话。
+      matchSettled = true
       render()
+      if (forced) {
+        // 保持暂停：白名单的约定是没对上集数就先别播，让用户自己挑一集
+        settleForced(`已匹配「${item.name}」，请手动选择集数`)
+      }
     } catch (error) {
       if (!isCurrentMatch(seq)) return
       busy = false
       notice = `读取集数失败：${(error as Error)?.message || error}`
       anime = undefined
+      settleForced(`读取集数失败：${(error as Error)?.message || error}`)
       render()
     }
   }
@@ -1328,8 +1588,12 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       if (!isCurrentMatch(seq)) return
       if (!comments.length) {
         busy = false
-        notice = `「${current.name}」${ep.name} 没有弹幕`
+        notice = '该集没有弹幕'
         setComments([])
+        // 这一集确实没弹幕：匹配到此为止，弹一句说清原因。
+        // 白名单页面**仍然扣着响应、也不放开暂停**——约定就是「没好结果先别播」，
+        // 用户点播放才会走 onVideoPlay 里的 releaseHold()。
+        settleForced('该集没有弹幕')
         render()
         return
       }
@@ -1337,13 +1601,29 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       notice = ''
       busy = false
       setComments(comments)
+      // 候选换了一版（重选集数/换番剧都会走 setComments）：已注入的分段
+      // 还停留在旧候选代数上，isStaleSegment() 就能判定。此时不能报
+      // 「加载成功」误导用户，要明说「当前段还是旧的，刷新生效」，
+      // 并把状态行右上角的刷新按钮亮出来。
+      const staleSeg = isStaleSegment()
+      releaseHold()
       rememberMatch(currentInfo, current, ep)
       render()
-      // 匹配成功：左下角弹番剧名 + 条数，不用开面板也知道选对了哪部、有多少条。
-      // 条数把已挂上的 URL 来源也算进去，那才是「整集一共有多少条三方弹幕」。
-      announceMatch(current.name, ep.name, comments.length + getTotalCount())
-      // 白名单页面是我们按住的，现在弹幕有了，替他把播放恢复上
-      resumeIfWePaused()
+      if (staleSeg) {
+        // 重选成功但已注入的分段还按旧集数合并：整集的新数据其实已经就绪，
+        // 状态行会显示总数，刷新页面后全部按新集数生效。
+        clearToast('hold')
+        showToast(
+          `已切换到「${current.name}」${ep.name}：已注入的分段仍是原集数，刷新页面后生效`,
+          { key: 'hold', duration: 8000 }
+        )
+      } else {
+        // 匹配成功：左下角弹番剧名 + 条数，不用开面板也知道选对了哪部、有多少条。
+        // 条数把已挂上的 URL 来源也算进去，那才是「整集一共有多少条三方弹幕」。
+        announceMatch(current.name, ep.name, comments.length + getTotalCount())
+        // 白名单页面是我们按住的，现在弹幕有了，替他把播放恢复上
+        resumeIfWePaused()
+      }
       // 弹幕就绪：让播放器把当前分段重新取一遍，否则已缓存的分段不会经过 hook
       reloadDanmaku()
     } catch (error) {
@@ -1357,7 +1637,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   async function doSearch() {
     const keyword = searchInput.value.trim()
     if (keyword.length < 2) {
-      notice = '至少输入 2 个字'
+      notice = '关键词至少 2 个字'
       render()
       return
     }
@@ -1383,9 +1663,9 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       busy = false
       if (!found.length) {
         setExpecting(false)
-        notice = '没有结果'
+        notice = '未找到匹配番剧'
         matchTip.textContent =
-          '弹弹play最多只回 25 条、按 id 升序且不翻页，短词可能搜不到，试试更长的子串。'
+          '弹弹play按番剧名子串检索，单次最多返回 25 条且按编号排序、不提供分页；未命中不代表数据库没有该作品，可换用更准确的关键词重试。'
         render()
         return
       }
@@ -1462,7 +1742,6 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       })
     }
   }
-
   // 播放器切全屏/宽屏会重建控制条，按钮被丢掉就重新挂回去。
   // 面板本身的位置不再跟着 DOM 变动走——那会让它在滚动时乱跳。
   //
@@ -1491,6 +1770,11 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   // 先把上个视频的扣留状态清掉：新页面的第一段请求不该被上一页的白名单结论拖住，
   // 真正的结论由 syncForced 异步下发。
   setHold(false)
+  // 预登记「马上要匹配」。必须在这一行就置上，不能等 ensureMatch：
+  // 下面那段 async 要先按 bvid 校标题、再 restoreSources（都可能等网络），
+  // 而播放器的首段 seg.so 请求往往在这之前就到了。之前只有 ensureMatch
+  // 开头置真，刷新页面后时序照样抢不过，于是「点了刷新生效，弹幕还是没合并」。
+  if (config.enabled) setExpecting(true)
   // 白名单结论要在第一段弹幕请求到达之前就定下来（hook 靠 setHold 决定扣不扣），
   // 所以这里不 await，和其他初始化并行跑。
   void syncForced()
@@ -1568,10 +1852,15 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
     // cid 路径已经确认过换集（pageKey 是 `cid:xxx`，这是最可靠的信号）。
     // 而 title/url 路径在运行时经常读不到分P（`__INITIAL_STATE__` 被 SPA
-    // 改写，episode 和 cid 都是空）。这时拿退化信息覆盖会把正确状态冲掉
-    // ——实测表现就是「toast 是第19话，面板却匹配成第18话」。
-    // 所以：cid 已知而读到的信息连 cid 都没有时，直接跳过，等 cid 路径更新。
-    if (currentPageKey.startsWith('cid:') && !next.cid && !next.episode) return
+    // 改写，cid 是空，episode 还可能停在上一个视频的值）。
+    // 拿这种退化信息覆盖会把正确状态冲掉 —— 实测表现有两个：
+    // ①「toast 是第19话，面板却匹配成第18话」；
+    // ② 换视频后 title 路径反复把手上的 cid 状态重置回 `vid:...#1`，
+    //    面板/匹配/暂停被连续推倒重来（用户日志里「检测到页面变化」
+    //    连刷三次就是这么来的）。
+    // 所以：手上已经是 cid 状态、而这一路连 cid 都读不到时，直接跳过。
+    // 真正的换集/换视频自有 bvid、ep_id、cid 三条路径负责。
+    if (currentPageKey.startsWith('cid:') && !next.cid) return
     const nextKey = pageKeyOf(next)
     if (nextKey === currentPageKey) return
 
@@ -1600,6 +1889,17 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     setPageKey(nextKey)
     resetUrlSources()
     render()
+    // 换了页面就要重新判一次白名单：`forced` 和 hook 里的 hold 都是上一个
+    // 视频留下的，不重判就会出现两种反向错误——上一个视频在白名单里，
+    // 新视频也被按住；新视频在白名单里，却因为 forced 还是 false 而
+    // 既不暂停也不弹提示（用户报的「有的白名单视频不暂停也不匹配」）。
+    //
+    // 结论出来之前先把上一页的判定沿用上：`syncForced()` 要等
+    // `resolveOwner()`，软跳转时还可能重试三次（2.4 秒），这段时间里新页面
+    // 的第一段请求已经在路上了，等结论出来再按就晚了。代价是 UP 主刚好
+    // 被移出白名单时会多按一小会儿——这个取舍用户已确认。
+    if (forced) beginForced()
+    void syncForced()
     void (async () => {
       // 软跳转到新视频时 `readPageInfo()` 给回的很可能是旧视频的标题
       // （`__INITIAL_STATE__` 没重写、DOM 还没刷）。按 URL 上的 bvid
@@ -1666,6 +1966,10 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       // URL 源是挂在 cid 上的，换集后要跟着换
       resetUrlSources()
       render()
+      // 同一个 UP 主换了集/换了分P：白名单待遇不变，不用等接口确认就能
+      // 重新按住。上一集匹配成功时 releaseHold() 过、pauseWatch 也停了，
+      // 不重做这一遍就会出现「切集之后既不暂停也不扣留」。
+      if (forced) beginForced()
       void (async () => {
         await restoreSources()
         render()
@@ -1720,9 +2024,12 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   return {
     dispose() {
       detached = true
+      // 白名单的扣留没有超时，页面卸载时必须把它撤掉：
+      // 否则旧页面上还挂着的分段请求会一直等，谁也不来放行。
+      setHold(false)
       if (anchorTimer !== undefined) window.clearTimeout(anchorTimer)
       if (checkTimer !== undefined) window.clearTimeout(checkTimer)
-      if (pauseTimer !== undefined) window.clearTimeout(pauseTimer)
+      stopPauseWatch()
       if (resumeTimer !== undefined) window.clearTimeout(resumeTimer)
       window.clearInterval(urlWatch)
       titleWatch.disconnect()
@@ -1730,6 +2037,8 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       window.removeEventListener('popstate', scheduleCheck)
       document.removeEventListener('click', onDocumentClick, true)
       document.removeEventListener('mousedown', onDocumentMouseDown, true)
+      document.removeEventListener('pointerdown', markGesture, true)
+      document.removeEventListener('keydown', markGesture, true)
       document.removeEventListener('play', onVideoPlay, true)
       window.removeEventListener('resize', onResize)
       window.removeEventListener('scroll', onScroll, true)

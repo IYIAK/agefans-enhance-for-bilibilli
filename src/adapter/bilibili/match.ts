@@ -523,7 +523,13 @@ export async function commentsOf(episodeId: number): Promise<Comment[]> {
 export async function findAnime(
   rawTitle: string,
   log?: (msg: string) => void
-): Promise<{ animes: AnimeItem[]; keyword: string; tried: string[] }> {
+): Promise<{
+  animes: AnimeItem[]
+  keyword: string
+  tried: string[]
+  /** 命中的候选唯一但与页面标题相似度过低，自动选中不可信，需要用户确认 */
+  needsConfirm?: boolean
+}> {
   const keywords = buildKeywords(rawTitle)
   if (!keywords.length) {
     throw new MatchError('没有可用的番剧名', { tried: [] })
@@ -544,10 +550,18 @@ export async function findAnime(
     // 关键词本身比 MIN_LCS 还短时（两字番名），不可能有 3 字的公共子串，
     // 这时要求整串都对上，否则会把所有结果误杀。
     const need = Math.min(MIN_LCS, squash(keyword).length)
-    const relevant = list.filter(
+    let relevant = list.filter(
       (o) => longestCommonSubstring(keyword, o.name) >= need
     )
+    // 唯一命中不再要求相似度：番剧常以别名收录（「画完这个」是《描绘直至
+    // 生命尽头》的别名），与页面标题的公共子串只有一两个字，按相似度过滤
+    // 会把它误杀掉继续试后面的关键词。库里只有这一条时，它就是最可能的
+    // 答案——但相似度低意味着自动选中不可信，交给用户确认。
+    if (!relevant.length && list.length === 1) relevant = list
     if (relevant.length) {
+      const needsConfirm =
+        relevant.length === 1 &&
+        longestCommonSubstring(keyword, relevant[0].name) < need
       log?.(`「${keyword}」命中 ${relevant.length} 条`)
       // 弹弹play 按 bangumiId 升序返回，跟相关度无关；
       // 这里按「跟清洗后的页面标题的公共子串长度」重排，
@@ -565,7 +579,7 @@ export async function findAnime(
           longestCommonSubstring(title, a.name)
         )
       })
-      return { animes: ranked, keyword, tried }
+      return { animes: ranked, keyword, tried, needsConfirm }
     }
     log?.(`「${keyword}」${list.length} 条结果都不相关`)
   }
@@ -717,12 +731,11 @@ export async function resolveMatch(
   if (!info.seriesName) {
     throw new MatchError('未识别到当前视频的标题')
   }
-
   const { animes, keyword, tried } = await findAnime(info.seriesName, log)
 
   const anime = chooseAnime(animes, info, hints)
   if (!anime) {
-    throw new MatchError('请选择番剧', { tried, animes })
+    throw new MatchError('请手动选择番剧名', { tried, animes })
   }
 
   const episodes = await episodeList(anime.id)
@@ -737,7 +750,7 @@ export async function resolveMatch(
 
   const episode = chooseEpisode(episodes, info, hints)
   if (!episode) {
-    throw new MatchError('请选择集数', {
+    throw new MatchError('请手动选择集数', {
       tried,
       animes,
       animeId: anime.id,

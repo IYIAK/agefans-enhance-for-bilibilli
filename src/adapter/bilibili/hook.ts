@@ -19,15 +19,6 @@ const SEGMENT_MS = 6 * 60 * 1000
 const MAX_PER_SEGMENT = 3000
 /** 等待弹幕匹配完成的最长时间（毫秒）。超过就放行，宁可这一段没三方弹幕也不能卡住播放器 */
 const LOAD_WAIT_MS = 8000
-/**
- * 白名单页面上「扣住响应」的最长时间（毫秒）。
- *
- * 扣住的意思是：播放器来要这一段弹幕，我们暂时不回，等匹配结果。
- * B 站播放器对这个请求不设超时（失败只重试 3 次、间隔 500ms），所以扣住
- * 期间它不会报错、也不会放弃，只是画面里暂时没有弹幕。
- * 60 秒是兜底：万一匹配链路卡死，也不能让播放器永远等下去。
- */
-const HOLD_MAX_MS = 60000
 /** 与原生弹幕去重的时间窗口（毫秒） */
 const NATIVE_DEDUPE_MS = 1500
 /** 第三方来源之间的去重窗口（巴哈姆特时间只精确到秒，放宽一点） */
@@ -106,7 +97,8 @@ interface HookState {
    * 当前页面是否走「强制匹配」（UP 主在白名单里）。
    *
    * 置真后，分段请求不会在 LOAD_WAIT_MS 就放行，而是一直扣到
-   * 匹配出结果 / 用户手动点播放 / 超过 HOLD_MAX_MS 三者之一。
+   * 匹配出结果 / 用户手动点播放 二者之一——**没有时间兜底**。
+   * 扣住的只是弹幕那一路，视频照常能放，所以挂着不会让播放器转圈。
    */
   hold: boolean
   /** 用户手动播放了（或主动放弃等待），立刻放行所有扣住的响应 */
@@ -160,6 +152,10 @@ export function setCid(cid?: number) {
 
 export function setComments(comments: Comment[] | null) {
   state.comments = comments
+  // 候选换了一版 = 已注入分段用的还是上一版候选。面板靠这个「候选代数」
+  // 判断当前段的弹幕是不是旧集数的：用户在弹弹play匹配区重选集数时
+  // 视频与 cid 都不变，唯一的信号就是这里的版本号变了。
+  commentsEpoch++
 }
 
 export function getComments() {
@@ -188,7 +184,13 @@ export function setExpecting(expecting: boolean) {
  */
 export function setHold(hold: boolean) {
   state.hold = hold
-  if (!hold) state.holdReleased = false
+  // 进、出扣留模式都把「用户已经放弃等待」这个标志清掉：
+  // - 退出时它没有意义了；
+  // - 进入时这是一次**新**的判定（换页，或刚把当前 UP 主加进白名单），
+  //   上一轮在这个页面上点过的播放不该让这一次扣留直接失效。
+  // 早先只在 `!hold` 时清，于是「先播着 → 把 UP 主加进白名单」这条路上，
+  // holdReleased 还停在 false→release 的旧值上，扣留一次都没生效过。
+  state.holdReleased = false
 }
 
 export function getHold() {
@@ -198,6 +200,18 @@ export function getHold() {
 /** 立刻放行所有扣住的响应（用户手动播放 / 主动放弃等待时调用） */
 export function releaseHold() {
   state.holdReleased = true
+  // 扣留一旦放行过，说明至少有一段响应已经按当时的候选合并并交给了播放器。
+  // 之后重选集数时：新候选只对「之后到达的分段请求」生效，已经合并进
+  // 播放器的那一段不会变——面板据此区分「正常注入」和「已缓存需刷新」。
+  holdEverReleased = true
+  // 还有可能正卡在 waitForLoading 的 100ms 睡眠里，最多再等一轮就放行；
+  // 这里不改 hold，让调用方决定这次扣留是「放行一次」还是「彻底退出」
+  // ——两者语义不同，混在一起会出现「退出扣留以后再也不扣」的错。
+}
+
+/** 本页面上是否已经有扣留放行过（即已有分段按当时的候选合并进播放器） */
+export function hasHoldEverReleased() {
+  return holdEverReleased
 }
 
 export function getStats(): HookStats {
@@ -213,6 +227,13 @@ export function resetPageState() {
   state.cid = undefined
   state.stats = emptyStats()
   lastRequestOid = null
+  // 换页/换集是新的一轮：上一页放行过扣留不代表这一页也有已合并的旧段
+  holdEverReleased = false
+  lastInjectedOid = null
+  // 候选代数从 0 重新数（setComments 会把它推到 1），
+  // lastInjectedEpoch 置 -1 表示「还没注入过任何段」
+  commentsEpoch = 0
+  lastInjectedEpoch = -1
 }
 
 function emptyStats(): HookStats {
@@ -670,6 +691,12 @@ function buildInjections(
 
   state.stats.segments++
   state.stats.injected += result.injected
+  // 记下最近一次成功注入时的 cid 与候选代数：面板用它们判断「当前段的
+  // 弹幕是按哪次候选合并的」。重选集数后 commentsEpoch 已前进，这段注入
+  // 追平代数之前，isStaleSegment() 都算 stale；换集（cid 变）后新段一旦
+  // 注入成功，两条记录立刻追上，stale 状态自动解除。
+  lastInjectedOid = request.oid ?? null
+  lastInjectedEpoch = commentsEpoch
   state.stats.lastMergedSeg = request.index ?? null
   const touches = [
     result.droppedNative ? `密度裁剪原生 ${result.droppedNative}` : '',
@@ -714,6 +741,33 @@ function notifyCid(cid: number) {
 
 /** 上一次见到的请求 cid，用来发现「换集了」 */
 let lastRequestOid: number | null = null
+/** 本页面上是否放行过扣留（releaseHold 置位，resetPageState 清零） */
+let holdEverReleased = false
+/** 最近一次成功注入分段时的 oid；面板用它判断「当前段合并自哪次候选」 */
+let lastInjectedOid: number | null = null
+/** 候选代数：setComments 每换一版候选就 +1（重选集数/换番剧都会变） */
+let commentsEpoch = 0
+/** 最近一次成功注入分段时用的候选代数 */
+let lastInjectedEpoch = -1
+
+/**
+ * 当前段是否仍按旧候选合并（stale）。
+ *
+ * 两个触发场景，判据合一：
+ * 1. 弹弹play匹配区**重选集数/换番剧**——视频与 cid 都不变，唯一信号是
+ *    setComments 换了候选代数，而已注入分段还停留在旧代数上；
+ * 2. **切分P/换集**（cid 变）——旧 cid 的分段还挂在播放器里，新 cid 的
+ *    分段尚未注入成功（lastInjectedOid 停在旧 cid 上）。
+ */
+export function isStaleSegment() {
+  // 从没注入过任何段：谈不上新旧
+  if (lastInjectedEpoch < 0) return false
+  // 当前候选代数更新：重选过集数，但还没注入过任何一段用新候选的弹幕
+  if (commentsEpoch !== lastInjectedEpoch) return true
+  // 注入过的段属于别的 cid（换集后新段还没到）：当前段不属于本集
+  if (state.cid && lastInjectedOid !== state.cid) return true
+  return false
+}
 
 /** 记一次弹幕分段请求（不管开关是否开启都记，方便诊断） */
 function countRequest(request: SegRequest | undefined) {
@@ -951,23 +1005,28 @@ function trackRequest(xhr: XHRWithContext, request: SegRequest) {
  *   两者都没有 = 这次页面压根不打算匹配（开关关着、或匹配已失败收场），
  *   立刻放行，不要让播放器等一个永远不来的结果。
  *
- * **白名单页面（hold）**：一直扣到有结果 / 用户手动点播放 / 超过 HOLD_MAX_MS。
+ * **白名单页面（hold）**：**没有超时**，一直扣到有结果 / 用户手动点播放。
  *   匹配失败也照样扣住——用户要的就是「没匹配上就先别浪费这一段」，
- *   他自己点播放就 `releaseHold()` 放行。
+ *   只有他自己点播放（`releaseHold()`）才放行。
+ *   扣住的只是弹幕那一路请求，视频本身照常能放，所以无限期挂着不会
+ *   让播放器转圈；页面换了（`state.hold` 变假）也会立刻收手，避免旧页面
+ *   上残留的请求把内存吊死。
  */
 async function waitForLoading() {
   if (state.comments) return
 
   const hold = state.hold
   if (hold) state.stats.held++
-  const deadline = Date.now() + (hold ? HOLD_MAX_MS : LOAD_WAIT_MS)
+  const deadline = Date.now() + LOAD_WAIT_MS
 
-  while (Date.now() < deadline) {
+  while (true) {
     if (state.comments) return
 
     if (hold) {
       // 用户手动播放 / 主动放弃等待：立刻放行
       if (state.holdReleased) return
+      // 页面已经不归白名单管了（换视频、换集、开关关掉），没有理由再扣
+      if (!state.hold) return
       // 先睡一下再取 loading，避免 loading 已 resolve 时空转
       await new Promise<void>((resolve) => setTimeout(resolve, 100))
       const loading = state.loading
@@ -979,6 +1038,9 @@ async function waitForLoading() {
       }
       continue
     }
+
+    // 普通页面只有有限等待，超时就不等了
+    if (Date.now() >= deadline) return
 
     // 判据是「有匹配在路上」或者「马上会有一次匹配」：
     // loading 在跑就等它，只有 expecting 就先小睡再取一次。
