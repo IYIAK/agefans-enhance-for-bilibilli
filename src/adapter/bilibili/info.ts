@@ -23,6 +23,7 @@ interface InitialState {
     title?: string
     cid?: number
     pages?: { cid?: number; page?: number; part?: string }[]
+    owner?: { mid?: number; name?: string }
   }
   p?: number
   aid?: number
@@ -69,11 +70,91 @@ export function readEpisodeId(): number | undefined {
   return toNumber(new URLSearchParams(location.search).get('ep_id'))
 }
 
+/** 视频作者（UP 主） */
+export interface BiliOwner {
+  mid: number
+  name: string
+}
+
+/**
+ * 当前视频的 UP 主。
+ *
+ * 内存状态里 `videoData.owner` 直接给了 `{mid, name, face}`，连网络都不用；
+ * 但它只属于「当前 URL 那个视频」（软跳转后可能是上一个视频的），
+ * 所以先交给 `currentVideoData()` 把不属于当前 bvid 的情况挡掉，
+ * 挡掉了再问 `x/web-interface/view?bvid=`（匿名可用）。
+ */
+export function readOwner(): BiliOwner | undefined {
+  const videoData = currentVideoData()
+  const owner = videoData?.owner
+  const mid = toNumber(owner?.mid)
+  if (mid) return { mid, name: String(owner?.name || '').trim() }
+  return undefined
+}
+
+const ownerCache = new Map<string, BiliOwner>()
+
+/** 内存里没有 owner 时的接口兜底（按 bvid 缓存，同一视频只会问一次） */
+export async function fetchOwner(bvid: string): Promise<BiliOwner | undefined> {
+  const cached = ownerCache.get(bvid)
+  if (cached) return cached
+  try {
+    const res = await fetch(
+      `https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`,
+      { credentials: 'omit' }
+    )
+    const body = (await res.json()) as {
+      code?: number
+      data?: { owner?: { mid?: number; name?: string } }
+    }
+    if (body?.code !== 0) return undefined
+    const mid = toNumber(body.data?.owner?.mid)
+    if (!mid) return undefined
+    const owner = { mid, name: String(body.data?.owner?.name || '').trim() }
+    ownerCache.set(bvid, owner)
+    return owner
+  } catch {
+    return undefined
+  }
+}
+
+/** 当前视频的 UP 主：先内存、再接口。用于白名单比对与「添加当前 UP 主」。 */
+export async function resolveOwner(): Promise<BiliOwner | undefined> {
+  const local = readOwner()
+  if (local) return local
+  const bvid = readBvid()
+  if (!bvid) return undefined
+  return fetchOwner(bvid)
+}
+
+/**
+ * 按 mid 查名字，只给白名单做展示用。
+ *
+ * 用 `x/web-interface/card`（匿名可用，实测 code 0）；
+ * `space/wbi/acc/info` 会报 -352 风控、按名字搜人的 `search/type` 报 412，
+ * 两条都不能用。拿不到就返回空字符串，白名单照旧按 mid 生效。
+ */
+export async function fetchUserName(mid: number): Promise<string> {
+  try {
+    const res = await fetch(
+      `https://api.bilibili.com/x/web-interface/card?mid=${mid}`,
+      { credentials: 'omit' }
+    )
+    const body = (await res.json()) as {
+      code?: number
+      data?: { card?: { name?: string } }
+    }
+    if (body?.code !== 0) return ''
+    return String(body.data?.card?.name || '').trim()
+  } catch {
+    return ''
+  }
+}
+
 /**
  * 当前分P 序号。B 站不会给 p=1 写参数，所以没有 p 就是第 1 分P；
  * `__INITIAL_STATE__.p` 在站内切换后是过期值，不能用来兜底。
- */
-function readUrlPage(): number {
+ */function readUrlPage(): number {
   return toNumber(new URLSearchParams(location.search).get('p')) ?? 1
 }
 

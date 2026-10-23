@@ -4,16 +4,28 @@
  * 入口是控制条右侧的一个图标按钮，点开才显示面板（点面板外面自动收起），
  * 找不到控制条时退化成一个右下角的小胶囊。
  */
-import { readBvid, readEpisodeId, readPageInfo, readVideoInfoByBvidAsync, readVideoInfoByCidAsync } from './info'
+import {
+  readOwner,
+  readBvid,
+  readEpisodeId,
+  readPageInfo,
+  readVideoInfoByBvidAsync,
+  readVideoInfoByCidAsync,
+  resolveOwner,
+  fetchUserName,
+} from './info'
 import type { BiliPageInfo } from './info'
 import {
   forceReloadDanmaku,
   getStats,
   onCidChange,
+  releaseHold,
   setCid,
   setComments,
   setDedupe,
   setEnabled,
+  setExpecting,
+  setHold,
   setLoading,
 } from './hook'
 import {
@@ -32,8 +44,8 @@ import {
 import type { AnimeItem, EpisodeItem } from './match'
 import { loadFilter, saveFilter } from './filters'
 import type { FilterConfig } from './filters'
-import { loadConfig, saveConfig } from './store'
-import type { BiliConfig } from './store'
+import { loadConfig, loadWhitelist, saveConfig, saveWhitelist } from './store'
+import type { BiliConfig, WhitelistEntry } from './store'
 import {
   addSource,
   getEntries,
@@ -124,6 +136,35 @@ function findOne<T extends Element = HTMLElement>(selectors: string[]) {
 function formatOffset(offsetMs: number) {
   const value = Math.round(offsetMs / 100) / 10
   return String(value)
+}
+
+/**
+ * 从用户输入里抠出 mid。
+ *
+ * 支持的写法：纯数字 UID、`space.bilibili.com/123`、
+ * `space.bilibili.com/123/video`、带 `?mid=123` 的链接。
+ * 不支持按名字：搜人的接口实测 412（要 cookie + wbi 签名），
+ * 存名字既校验不了也没法用来比对，白名单只认 mid。
+ */
+function parseMid(input: string): number | undefined {
+  const text = input.trim()
+  if (!text) return undefined
+  if (/^\d+$/.test(text)) {
+    const n = Number(text)
+    return Number.isFinite(n) && n > 0 ? n : undefined
+  }
+  const fromQuery = text.match(/[?&]mid=(\d+)/)
+  if (fromQuery) {
+    const n = Number(fromQuery[1])
+    return Number.isFinite(n) && n > 0 ? n : undefined
+  }
+  // space.bilibili.com/3493112693394137 这类主页链接
+  const fromPath = text.match(/(\d{3,})/)
+  if (fromPath) {
+    const n = Number(fromPath[1])
+    return Number.isFinite(n) && n > 0 ? n : undefined
+  }
+  return undefined
 }
 
 /**
@@ -236,6 +277,40 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
   const urlList = el('div', `${ROOT_CLASS}__list`)
   const urlTip = el('div', `${ROOT_CLASS}__tip`)
+
+  // ── UP 主白名单 ─────────────────────────────────────────
+  //
+  // 为什么要有：B 站视频一加载完就发第一段弹幕请求，播放器把它缓存在
+  // DanmakuStore.allSegment 里，之后再选集也不会重发。于是「先播几秒才选集」
+  // 这种情况，前 6 分钟永远没有第三方弹幕，而且没有任何运行时手段能补救
+  // （player.reload 跳进度、seek 挪位置，都被否决过）。
+  //
+  // 白名单给出的答案是「一开始就别让它播」：这些 UP 主的视频，匹配没出结果
+  // 之前把弹幕响应扣住不回，同时暂停播放；用户自己点播放就立刻放行。
+  const whitelistTitle = el(
+    'div',
+    `${ROOT_CLASS}__section ${ROOT_CLASS}__section--row`
+  )
+  whitelistTitle.append(el('span', undefined, '强制匹配'))
+  const whitelistCount = el('span', `${ROOT_CLASS}__fold-badge`)
+  whitelistTitle.append(whitelistCount)
+
+  const whitelistRow = el('div', `${ROOT_CLASS}__row ${ROOT_CLASS}__row--input`)
+  const whitelistInput = el('input', `${ROOT_CLASS}__input`) as HTMLInputElement
+  whitelistInput.type = 'text'
+  whitelistInput.placeholder = 'UP 主 UID 或主页链接'
+  const whitelistAddBtn = el('button', `${ROOT_CLASS}__mini`, '添加')
+  whitelistRow.append(whitelistInput, whitelistAddBtn)
+
+  const whitelistSelfBtn = el(
+    'button',
+    `${ROOT_CLASS}__minor`,
+    '把当前视频的 UP 主加进来'
+  )
+  whitelistSelfBtn.type = 'button'
+
+  const whitelistList = el('div', `${ROOT_CLASS}__list`)
+  const whitelistTip = el('div', `${ROOT_CLASS}__tip`)
 
   // 弹弹play
   // 这里原来有「重新匹配」「换番剧」两个按钮，语义和下面这排搜索完全重叠：
@@ -409,6 +484,11 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     switchRow,
     dedupeRow,
     status,
+    whitelistTitle,
+    whitelistRow,
+    whitelistSelfBtn,
+    whitelistList,
+    whitelistTip,
     ddpTitle,
     searchRow,
     candidates,
@@ -635,6 +715,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     } else {
       setComments(null)
       setLoading(null)
+      setExpecting(false)
       clearToast()
     }
   })
@@ -645,6 +726,197 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     setDedupe(config.dedupe)
     render()
   })
+
+  // ── UP 主白名单 ─────────────────────────────────────────
+  let whitelist: WhitelistEntry[] = loadWhitelist()
+  /** 当前页面是否命中白名单（命中就走强制匹配） */
+  let forced = false
+  /** 是我们把视频按住的（用户自己暂停的不算，也就不能替他恢复） */
+  let pausedByUs = false
+  let pauseTimer: number | undefined
+  let resumeTimer: number | undefined
+
+  function isWhitelisted(mid?: number) {
+    if (!mid) return false
+    return whitelist.some((o) => o.mid === mid)
+  }
+
+  function persistWhitelist() {
+    saveWhitelist(whitelist)
+    renderWhitelist()
+  }
+
+  function renderWhitelist() {
+    whitelistCount.textContent = whitelist.length ? String(whitelist.length) : ''
+    whitelistList.textContent = ''
+    if (!whitelist.length) {
+      whitelistList.append(
+        el('div', `${ROOT_CLASS}__tip`, '还没有强制匹配的 UP 主')
+      )
+    } else {
+      for (const item of whitelist) {
+        const row = el('div', `${ROOT_CLASS}__url`)
+        const head = el('div', `${ROOT_CLASS}__url-head`)
+        const name = el(
+          'span',
+          `${ROOT_CLASS}__url-name`,
+          item.name || `UID ${item.mid}`
+        )
+        name.title = `UID ${item.mid}`
+        const remove = el('button', `${ROOT_CLASS}__icon`, '×')
+        remove.title = '移出白名单'
+        remove.addEventListener('click', (e) => {
+          e.stopPropagation()
+          whitelist = whitelist.filter((o) => o.mid !== item.mid)
+          persistWhitelist()
+          void syncForced()
+        })
+        head.append(name, remove)
+        row.append(head)
+        whitelistList.append(row)
+      }
+    }
+    whitelistTip.textContent = forced
+      ? '当前视频的 UP 主在白名单里：匹配出结果前先按住播放'
+      : '白名单 UP 主的视频会先暂停，等匹配出结果再开始'
+  }
+
+  /**
+   * 判定当前页面要不要走强制匹配，并把结论同步给 hook。
+   *
+   * 只认 mid：按名字搜人的接口实测 412（要 cookie + wbi 签名），
+   * 名字既无法校验也没法比对。
+   */
+  async function syncForced() {
+    if (detached) return
+    const owner = await resolveOwner().catch(() => undefined)
+    if (detached) return
+    const nextForced = isWhitelisted(owner?.mid)
+    if (nextForced === forced) {
+      // 白名单本身变了（加了/删了），即使当前页面结论没变也要重绘
+      renderWhitelist()
+      return
+    }
+    forced = nextForced
+    setHold(forced)
+    renderWhitelist()
+    if (forced) {
+      schedulePause()
+    } else {
+      // 退出强制匹配：把我们按住的视频放开，别留着用户一个暂停的画面
+      cancelPause()
+      releaseHold()
+      resumeIfWePaused()
+    }
+  }
+
+  /**
+   * 白名单页面上「匹配没出结果就先暂停」。
+   *
+   * 等 1 秒才动手：绝大多数视频 1 秒内就匹配好了（实测弹弹play 通常
+   * 一次往返），这种情况下暂停再恢复反而闪一下，体验更差。
+   */
+  function schedulePause() {
+    cancelPause()
+    pauseTimer = window.setTimeout(() => {
+      pauseTimer = undefined
+      if (!forced || detached) return
+      // 已经匹配好了就别按了
+      if (anime && episode) return
+      const video = findOne<HTMLVideoElement>(['video'])
+      if (!video) return
+      if (video.paused) return
+      pausedByUs = true
+      try {
+        video.pause()
+      } catch {
+        pausedByUs = false
+      }
+    }, 1000)
+  }
+
+  function cancelPause() {
+    if (pauseTimer !== undefined) {
+      window.clearTimeout(pauseTimer)
+      pauseTimer = undefined
+    }
+  }
+
+  /** 匹配成功后把我们自己按下的视频放开 */
+  function resumeIfWePaused() {
+    if (!pausedByUs) return
+    pausedByUs = false
+    if (resumeTimer !== undefined) window.clearTimeout(resumeTimer)
+    // 稍等一下：匹配成功那一刻弹幕还在注入，立刻播放会先闪一段空的
+    resumeTimer = window.setTimeout(() => {
+      resumeTimer = undefined
+      if (detached) return
+      const video = findOne<HTMLVideoElement>(['video'])
+      if (!video || !video.paused) return
+      const played = video.play()
+      if (played && typeof played.catch === 'function') played.catch(() => undefined)
+    }, 300)
+  }
+
+  /**
+   * 用户自己点了播放 = 他不想等匹配了。
+   *
+   * 立刻放行所有扣住的响应（否则播放器会一直等我们那一段），
+   * 并把 pausedByUs 清掉——之后匹配成功也不要再去暂停/恢复他的视频。
+   */
+  function onVideoPlay() {
+    if (!forced) return
+    pausedByUs = false
+    releaseHold()
+    cancelPause()
+  }
+
+  function addWhitelistByMid(mid: number) {
+    if (whitelist.some((o) => o.mid === mid)) return
+    // 先用 UID 占位，名字异步补上（拿不到就一直显示 UID）
+    whitelist = [...whitelist, { mid, name: '' }]
+    persistWhitelist()
+    void syncForced()
+    void fetchUserName(mid).then((name) => {
+      if (detached || !name) return
+      whitelist = whitelist.map((o) => (o.mid === mid ? { ...o, name } : o))
+      persistWhitelist()
+    })
+  }
+
+  whitelistAddBtn.addEventListener('click', () => {
+    const mid = parseMid(whitelistInput.value)
+    if (!mid) {
+      whitelistTip.textContent = '填 UID（纯数字）或 space.bilibili.com/123 这样的主页链接'
+      return
+    }
+    addWhitelistByMid(mid)
+    whitelistInput.value = ''
+  })
+  whitelistInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') whitelistAddBtn.click()
+  })
+
+  whitelistSelfBtn.addEventListener('click', () => {
+    const owner = readOwner()
+    if (owner) {
+      addWhitelistByMid(owner.mid)
+      return
+    }
+    whitelistSelfBtn.disabled = true
+    void resolveOwner()
+      .then((resolved) => {
+        if (detached) return
+        if (resolved) addWhitelistByMid(resolved.mid)
+        else whitelistTip.textContent = '拿不到当前视频的 UP 主'
+      })
+      .finally(() => {
+        whitelistSelfBtn.disabled = false
+      })
+  })
+
+  // 用户点播放就放行。用捕获阶段，且只关心真正的 play（不是 seek 引起的）
+  document.addEventListener('play', onVideoPlay, true)
 
   // ── 匹配状态 ────────────────────────────────────────────
   let anime: AnimeItem | undefined
@@ -684,6 +956,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     renderCandidates()
     renderEpisodes()
     renderUrls()
+    renderWhitelist()
 
     urlTip.classList.remove('is-error')
     urlTip.textContent = config.enabled
@@ -700,6 +973,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       `通道 xhr${stats.xhrs}/fetch${stats.fetches}`,
       `合并 ${stats.segments} 段/${stats.injected} 条`,
       `错失 ${stats.missed} 段`,
+      ...(stats.held ? [`扣住 ${stats.held} 段`] : []),
       `过滤 ${stats.filtered} 条／合并重复 ${stats.merged} 条` +
         (stats.droppedNative ? `／密度裁剪 ${stats.droppedNative} 条` : ''),
       `段 ${stats.lastSeg ?? '-'}／合至 ${stats.lastMergedSeg ?? '-'}`,
@@ -923,6 +1197,10 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
   async function ensureMatch() {
     if (!config.enabled) return
+    // 先登记「马上要匹配」，再去干那些耗时的事（读页面信息、恢复 URL 源、一次网络往返）。
+    // 播放器的首段请求几乎总是落在这段空档里，没这个预登记它就只能被告知
+    // 「没有匹配」而放行——首段于是永久丢掉，到第二段才开始有第三方弹幕。
+    setExpecting(true)
     busy = true
     resetMatch('匹配中…')
     const seq = matchSeq
@@ -971,7 +1249,12 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
 
     setLoading(task.then(() => undefined, () => undefined))
     await task
-    if (isCurrentMatch(seq)) setLoading(null)
+    if (isCurrentMatch(seq)) {
+      setLoading(null)
+      // 匹配收场（成功或失败）。失败也要清掉预登记，否则之后到达的分段请求
+      // 会白白等到 LOAD_WAIT_MS 才放行，每段弹幕都晚 8 秒。
+      setExpecting(false)
+    }
   }
 
   function autoPick(list: AnimeItem[]) {
@@ -1059,6 +1342,8 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       // 匹配成功：左下角弹番剧名 + 条数，不用开面板也知道选对了哪部、有多少条。
       // 条数把已挂上的 URL 来源也算进去，那才是「整集一共有多少条三方弹幕」。
       announceMatch(current.name, ep.name, comments.length + getTotalCount())
+      // 白名单页面是我们按住的，现在弹幕有了，替他把播放恢复上
+      resumeIfWePaused()
       // 弹幕就绪：让播放器把当前分段重新取一遍，否则已缓存的分段不会经过 hook
       reloadDanmaku()
     } catch (error) {
@@ -1086,6 +1371,9 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     anime = undefined
     episode = undefined
     episodeOptions = []
+    // 手搜也是一次匹配：在这期间到达的分段请求应该等一下，而不是带着
+    // 一份空的候选集被放行。
+    setExpecting(true)
     setComments(null)
     render()
 
@@ -1094,6 +1382,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       if (!isCurrentMatch(seq)) return
       busy = false
       if (!found.length) {
+        setExpecting(false)
         notice = '没有结果'
         matchTip.textContent =
           '弹弹play最多只回 25 条、按 id 升序且不翻页，短词可能搜不到，试试更长的子串。'
@@ -1105,9 +1394,12 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       candidateList = found.slice(0, 8)
       matchTip.textContent = `「${keyword}」共 ${found.length} 条`
       render()
+      // 候选有了，但还没选集，弹幕还不够：继续挂着，等用户点完候选。
+      setExpecting(true)
     } catch (error) {
       if (!isCurrentMatch(seq)) return
       busy = false
+      setExpecting(false)
       notice = `搜索失败：${(error as Error)?.message || error}`
       render()
     }
@@ -1196,6 +1488,12 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   setDedupe(config.dedupe)
   resetUrlSources()
   render()
+  // 先把上个视频的扣留状态清掉：新页面的第一段请求不该被上一页的白名单结论拖住，
+  // 真正的结论由 syncForced 异步下发。
+  setHold(false)
+  // 白名单结论要在第一段弹幕请求到达之前就定下来（hook 靠 setHold 决定扣不扣），
+  // 所以这里不 await，和其他初始化并行跑。
+  void syncForced()
 
   void (async () => {
     // 挂载时先把「这真的属于当前 URL 的那条视频吗」验一遍。
@@ -1424,12 +1722,15 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       detached = true
       if (anchorTimer !== undefined) window.clearTimeout(anchorTimer)
       if (checkTimer !== undefined) window.clearTimeout(checkTimer)
+      if (pauseTimer !== undefined) window.clearTimeout(pauseTimer)
+      if (resumeTimer !== undefined) window.clearTimeout(resumeTimer)
       window.clearInterval(urlWatch)
       titleWatch.disconnect()
       window.removeEventListener('routechange', scheduleCheck)
       window.removeEventListener('popstate', scheduleCheck)
       document.removeEventListener('click', onDocumentClick, true)
       document.removeEventListener('mousedown', onDocumentMouseDown, true)
+      document.removeEventListener('play', onVideoPlay, true)
       window.removeEventListener('resize', onResize)
       window.removeEventListener('scroll', onScroll, true)
       if (scrollRaf) window.cancelAnimationFrame(scrollRaf)

@@ -17,13 +17,17 @@ const SEG_PATH = /\/x\/v2\/dm\/(?:wbi\/)?(?:web|list)\/seg\.so/
 const SEGMENT_MS = 6 * 60 * 1000
 /** 每个分段最多追加多少条，避免异常数据拖慢解码 */
 const MAX_PER_SEGMENT = 3000
-/** 等待弹幕匹配完成的最长时间（毫秒），只在实际有一次匹配在路上时才用满 */
-const LOAD_WAIT_MS = 4000
+/** 等待弹幕匹配完成的最长时间（毫秒）。超过就放行，宁可这一段没三方弹幕也不能卡住播放器 */
+const LOAD_WAIT_MS = 8000
 /**
- * 启动宽限期（毫秒）。播放器可能在 panel 调 setLoading 之前就发出第一段请求，
- * 给这么一小段时间让匹配登记上来；超过还没登记就认定「没有匹配」，立刻放行。
+ * 白名单页面上「扣住响应」的最长时间（毫秒）。
+ *
+ * 扣住的意思是：播放器来要这一段弹幕，我们暂时不回，等匹配结果。
+ * B 站播放器对这个请求不设超时（失败只重试 3 次、间隔 500ms），所以扣住
+ * 期间它不会报错、也不会放弃，只是画面里暂时没有弹幕。
+ * 60 秒是兜底：万一匹配链路卡死，也不能让播放器永远等下去。
  */
-const STARTUP_GRACE_MS = 300
+const HOLD_MAX_MS = 60000
 /** 与原生弹幕去重的时间窗口（毫秒） */
 const NATIVE_DEDUPE_MS = 1500
 /** 第三方来源之间的去重窗口（巴哈姆特时间只精确到秒，放宽一点） */
@@ -74,6 +78,8 @@ interface HookStats {
    * 一开始就是开的，所有请求都算 armed，那个条件永远不成立。
    */
   missed: number
+  /** 白名单页面上被扣住过的分段请求数（扣住 = 暂时不回响应） */
+  held: number
   /** 最近一次分段请求的生命周期（readyState/status/是否被中止/是否读了 response） */
   lastState: string
   /** response getter 的安装结果，装不上时这里写原因 */
@@ -87,6 +93,24 @@ interface HookState {
   /** 弹弹play 的弹幕 */
   comments: Comment[] | null
   loading: Promise<void> | null
+  /**
+   * 「马上会有一次匹配」的预登记。
+   *
+   * 页面加载时播放器发出第一段请求，几乎总是早于 panel 的 ensureMatch 真正开始
+   * （中间隔着 readPageInfo、restoreSources、一次网络往返）。如果只认 loading，
+   * 这个窗口里到达的请求就只能被告知「没有匹配」而放行——偏偏它就是首段。
+   * panel 在决定要匹配的那一刻就把这里置真，匹配结束（成功/失败）才清掉。
+   */
+  expecting: boolean
+  /**
+   * 当前页面是否走「强制匹配」（UP 主在白名单里）。
+   *
+   * 置真后，分段请求不会在 LOAD_WAIT_MS 就放行，而是一直扣到
+   * 匹配出结果 / 用户手动点播放 / 超过 HOLD_MAX_MS 三者之一。
+   */
+  hold: boolean
+  /** 用户手动播放了（或主动放弃等待），立刻放行所有扣住的响应 */
+  holdReleased: boolean
   stats: HookStats
 }
 
@@ -106,6 +130,9 @@ const state: HookState = {
   dedupe: true,
   comments: null,
   loading: null,
+  expecting: false,
+  hold: false,
+  holdReleased: false,
   stats: emptyStats(),
 }
 
@@ -143,6 +170,36 @@ export function setLoading(loading: Promise<void> | null) {
   state.loading = loading
 }
 
+/**
+ * 预登记「马上要去匹配」。
+ *
+ * 必须在真正开始匹配**之前**调用：页面加载时首段请求往往比 ensureMatch 早
+ * 一到两百毫秒到达，中间这段时间是唯一会丢首段的窗口。
+ */
+export function setExpecting(expecting: boolean) {
+  state.expecting = expecting
+}
+
+/**
+ * 切换「强制匹配」模式：置真后分段请求会被扣住不放行。
+ *
+ * 只给白名单 UP 主用。扣住期间播放器画面里没有弹幕，用户要么等匹配
+ * 出结果，要么自己点播放——一点播放就 `releaseHold()`。
+ */
+export function setHold(hold: boolean) {
+  state.hold = hold
+  if (!hold) state.holdReleased = false
+}
+
+export function getHold() {
+  return state.hold
+}
+
+/** 立刻放行所有扣住的响应（用户手动播放 / 主动放弃等待时调用） */
+export function releaseHold() {
+  state.holdReleased = true
+}
+
 export function getStats(): HookStats {
   return { ...state.stats }
 }
@@ -151,6 +208,8 @@ export function getStats(): HookStats {
 export function resetPageState() {
   state.comments = null
   state.loading = null
+  state.expecting = false
+  state.holdReleased = false
   state.cid = undefined
   state.stats = emptyStats()
   lastRequestOid = null
@@ -173,6 +232,7 @@ function emptyStats(): HookStats {
     droppedNative: 0,
     merged: 0,
     missed: 0,
+    held: 0,
     lastState: '',
     hook: '',
   }
@@ -882,28 +942,53 @@ function trackRequest(xhr: XHRWithContext, request: SegRequest) {
  * 等匹配出结果。播放器往往在弹弹play 返回之前就请求了第一段，
  * 现在请求由我们接管，可以放心地等数据到齐再回填回调。
  *
- * 但「等」必须是有前提的：只有在真的有一次匹配在路上时才值得等。
- * 之前是无条件等满 4 秒——匹配失败、开关刚打开还没开始匹配、
- * 或者根本没匹配上，这 4 秒就纯属白等，每段弹幕都晚 4 秒才显示。
- * 现在改成：没有匹配在路上就只给一个很短的启动宽限期（覆盖
- * 「请求先到、panel 后调 setLoading」这个竞态），然后立刻放行。
+ * 两种模式：
+ *
+ * **普通页面**：判据是 `expecting || loading`，上界 LOAD_WAIT_MS。
+ *   - `expecting` 由 panel 在决定匹配的那一刻置真，覆盖「请求比匹配更早到」
+ *     这个首段必踩的窗口；
+ *   - `loading` 是匹配真的在跑。
+ *   两者都没有 = 这次页面压根不打算匹配（开关关着、或匹配已失败收场），
+ *   立刻放行，不要让播放器等一个永远不来的结果。
+ *
+ * **白名单页面（hold）**：一直扣到有结果 / 用户手动点播放 / 超过 HOLD_MAX_MS。
+ *   匹配失败也照样扣住——用户要的就是「没匹配上就先别浪费这一段」，
+ *   他自己点播放就 `releaseHold()` 放行。
  */
 async function waitForLoading() {
   if (state.comments) return
 
-  const deadline = Date.now() + LOAD_WAIT_MS
-  const graceDeadline = Date.now() + STARTUP_GRACE_MS
-  let sawLoading = false
+  const hold = state.hold
+  if (hold) state.stats.held++
+  const deadline = Date.now() + (hold ? HOLD_MAX_MS : LOAD_WAIT_MS)
 
   while (Date.now() < deadline) {
+    if (state.comments) return
+
+    if (hold) {
+      // 用户手动播放 / 主动放弃等待：立刻放行
+      if (state.holdReleased) return
+      // 先睡一下再取 loading，避免 loading 已 resolve 时空转
+      await new Promise<void>((resolve) => setTimeout(resolve, 100))
+      const loading = state.loading
+      if (loading) {
+        await loading.then(
+          () => undefined,
+          () => undefined
+        )
+      }
+      continue
+    }
+
+    // 判据是「有匹配在路上」或者「马上会有一次匹配」：
+    // loading 在跑就等它，只有 expecting 就先小睡再取一次。
+    // 两者都没有 = 这次页面压根不打算匹配，立刻放行。
     const loading = state.loading
     if (!loading) {
-      // 已经在窄限期外，而且从头到尾没见过匹配：直接放行
-      if (!sawLoading && Date.now() >= graceDeadline) return
+      if (!state.expecting) return
       await new Promise<void>((resolve) => setTimeout(resolve, 50))
       continue
     }
-    sawLoading = true
     await loading.then(
       () => undefined,
       () => undefined

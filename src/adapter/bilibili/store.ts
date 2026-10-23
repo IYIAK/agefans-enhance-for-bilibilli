@@ -5,6 +5,8 @@ const CONFIG_KEY = 'bilibili-danmaku-config-v2'
 /** v3 起 URL 来源按「页面」分开存，避免在别的视频上加的来源跑过来 */
 const SOURCES_KEY = 'bilibili-danmaku-sources-v3'
 const OFFSET_KEY = 'bilibili-danmaku-offset-v2'
+/** UP 主白名单：这些作者的视频走「强制匹配」，匹配不出来就先别播 */
+const WHITELIST_KEY = 'bilibili-danmaku-whitelist-v1'
 
 export interface BiliConfig {
   /** 总开关：开启后才注入弹幕 */
@@ -72,4 +74,33 @@ export function storageSourceOffset(url: string, offsetMs?: number): number {
   }
   const value = Number(map[url])
   return Number.isFinite(value) ? value : 0
+}
+
+/**
+ * UP 主白名单里的一项。
+ *
+ * 只认 mid（数字 UID）：按名字搜人的接口需要 cookie + wbi 签名，实测 412，
+ * 存名字既不稳定也没法校验。名字只做展示，唯一可信的身份是 mid。
+ */
+export interface WhitelistEntry {
+  mid: number
+  /** 展示用的名字，允许为空（接口拿不到时） */
+  name: string
+}
+
+export function loadWhitelist(): WhitelistEntry[] {
+  const raw = gm.getItem<any>(WHITELIST_KEY, [])
+  if (!Array.isArray(raw)) return []
+  const list: WhitelistEntry[] = []
+  for (const item of raw) {
+    const mid = Number(item?.mid)
+    if (!Number.isFinite(mid) || mid <= 0) continue
+    if (list.some((o) => o.mid === mid)) continue
+    list.push({ mid, name: String(item?.name || '').trim() })
+  }
+  return list
+}
+
+export function saveWhitelist(list: WhitelistEntry[]) {
+  gm.setItem(WHITELIST_KEY, list)
 }

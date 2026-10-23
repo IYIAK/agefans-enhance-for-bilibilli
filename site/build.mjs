@@ -128,6 +128,11 @@ function homePage() {
       title: '藏在控制条里的面板',
       desc: '控制条右侧一个图标按钮，点开才出现，点面板外面自动收起，不挡画面。',
     },
+    {
+      icon: ICONS.clock,
+      title: 'UP 主白名单',
+      desc: '把常看的 UP 主加进白名单，他们的视频匹配好再开始播 —— 救回「先播几秒才选集」时注定丢掉的第一段弹幕。',
+    },
   ]
 
   const sources = [

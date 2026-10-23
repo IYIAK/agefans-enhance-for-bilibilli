@@ -467,6 +467,49 @@
     }
   }
 
+  // 标题栏右侧的计数徽标（白名单条数）。空字符串时不占位，靠 :empty 收掉。
+  &__fold-badge {
+    flex: 0 0 auto;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    box-sizing: border-box;
+    border-radius: 8px;
+    background: rgba(251, 114, 153, 0.18);
+    color: #fb7299;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 16px;
+    text-align: center;
+
+    &:empty {
+      display: none;
+    }
+  }
+
+  // 整行宽的次要按钮（「把当前视频的 UP 主加进来」这类动作）
+  &__minor {
+    width: 100%;
+    height: 26px;
+    padding: 0 8px;
+    border: 1px dashed rgba(255, 255, 255, 0.16);
+    border-radius: 4px;
+    background: transparent;
+    color: #9ca3af;
+    font-size: 11px;
+    cursor: pointer;
+
+    &:hover:not(:disabled) {
+      border-color: #fb7299;
+      color: #fff;
+    }
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+  }
+
   &__select {
     width: 100%;
     height: 26px;

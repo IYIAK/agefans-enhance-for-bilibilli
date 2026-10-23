@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>panel mock</title>
+<style>
+  /* 真实面板样式：构建时从 src/adapter/bilibili/index.scss 编译进来 */
+  __PANEL_CSS__
+</style>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 28px;
+    background: #0f1013;
+    font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    color: #e5e7eb;
+  }
+  .stage { position: relative; width: 1180px; }
+
+  /* ── 模拟的播放器画面 ───────────────────────── */
+  .player {
+    position: relative;
+    width: 1180px;
+    height: 760px;
+    border-radius: 6px;
+    overflow: hidden;
+    background:
+      radial-gradient(120% 90% at 20% 0%, #2a3446 0%, #151a24 55%, #0d1017 100%);
+    box-shadow: 0 18px 50px rgba(0,0,0,.55);
+  }
+  .player .scene {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(45% 60% at 62% 42%, rgba(251,114,153,.20), transparent 70%),
+      radial-gradient(35% 45% at 30% 72%, rgba(96,165,250,.16), transparent 70%);
+  }
+  /* 飘过的弹幕 */
+  .fly {
+    position: absolute;
+    font-size: 19px;
+    font-weight: 700;
+    white-space: nowrap;
+    color: #fff;
+    text-shadow: 0 0 2px #000, 0 1px 2px #000, 1px 0 1px #000, -1px 0 1px #000;
+    opacity: .95;
+  }
+  .fly.a { top: 64px;  left: 40px;  color: #ffe066; }
+  .fly.b { top: 104px; left: 300px; }
+  .fly.c { top: 150px; left: 560px; color: #7ee7c7; }
+  .fly.d { top: 200px; left: 150px; }
+  .fly.e { top: 250px; left: 430px; color: #ffb3c7; }
+  .fly.f { top: 400px; left: 300px; }
+  .fly.g { top: 350px; left: 260px; color: #9ecbff; }
+  .fly.h { top: 104px; left: 620px; color: #ffe066; }
+
+  .ep-label {
+    position: absolute; top: 18px; left: 20px;
+    font-size: 13px; color: rgba(255,255,255,.5);
+    letter-spacing: .02em;
+  }
+
+  /* ── 模拟的 B 站控制条 ───────────────────────── */
+  .ctrl {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    padding: 0 14px 8px;
+    background: linear-gradient(to top, rgba(0,0,0,.82), rgba(0,0,0,.28) 62%, transparent);
+  }
+  .progress {
+    position: relative;
+    height: 12px;
+    display: flex; align-items: center;
+  }
+  .progress .track { width: 100%; height: 3px; border-radius: 2px; background: rgba(255,255,255,.24); }
+  .progress .played { position: absolute; left: 0; width: 34%; height: 3px; border-radius: 2px; background: #fb7299; }
+  .progress .dot { position: absolute; left: 34%; width: 9px; height: 9px; margin-left: -4px; border-radius: 50%; background: #fb7299; }
+
+  .bar {
+    display: flex; align-items: center;
+    gap: 0;
+    height: 34px;
+    color: rgba(255,255,255,.9);
+  }
+  .bar .spacer { flex: 1 1 auto; }
+  .bar .plain {
+    display: inline-flex; align-items: center; justify-content: center;
+    height: 26px; padding: 0 7px;
+    font-size: 13px; color: rgba(255,255,255,.88);
+    white-space: nowrap;
+  }
+  .bar .icon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; margin-right: 4px;
+    opacity: .9;
+  }
+  .bar .icon-btn svg { width: 20px; height: 20px; display: block; }
+  .bar .time { font-size: 12px; color: rgba(255,255,255,.72); padding: 0 8px; }
+
+  /* 面板按 position:fixed 定位，这里改成 absolute 才能截进同一张图 */
+  .k-bili-dm__panel { position: absolute !important; }
+  .k-bili-dm__btn { transform: none !important; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="player">
+    <div class="scene"></div>
+    <div class="ep-label">世界最强的魔女，就此开始动 第3话 揭示板を見てみた！</div>
+
+    <div class="fly a">这个番的弹幕好厚</div>
+    <div class="fly b">前排提示：第三话有彩蛋</div>
+    <div class="fly c">弹弹play的弹幕终于进来了</div>
+    <div class="fly d">画质好评</div>
+    <div class="fly e">哈哈哈哈哈哈哈</div>
+    <div class="fly f">混在一起居然没重复</div>
+    <div class="fly g">求 BGM 名字</div>
+    <div class="fly h">这里我哭死</div>
+
+    <!-- 控制条 -->
+    <div class="ctrl">
+      <div class="progress">
+        <div class="track"></div>
+        <div class="played"></div>
+        <div class="dot"></div>
+      </div>
+      <div class="bar">
+        <!-- 播放/进度 -->
+        <span class="icon-btn" title="播放">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        </span>
+        <span class="time">00:28 / 32:28</span>
+
+        <span class="spacer"></span>
+
+        <!-- 我们的按钮：位于清晰度左侧 -->
+        <span class="k-bili-dm__btn is-active" title="第三方弹幕">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-7l-4.6 3.5A1 1 0 0 1 7 19.6V17H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm2 4v2h2V8H6Zm4 0v2h8V8h-8Zm-4 4v2h8v-2H6Zm10 0v2h2v-2h-2Z"/></svg>
+        </span>
+        <span class="plain">1080P</span>
+        <span class="plain">倍速</span>
+        <span class="icon-btn" title="音量"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 9v6h4l5 4V5L8 9H4zm12.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4z"/></svg></span>
+        <span class="icon-btn" title="设置"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm8.4 4a8.4 8.4 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a8.3 8.3 0 0 0-2-1.2L15.5 3h-4l-.4 2.6a8.3 8.3 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6a8.4 8.4 0 0 0 0 2.4l-2 1.6 2 3.4 2.4-1a8.3 8.3 0 0 0 2 1.2l.4 2.6h4l.4-2.6a8.3 8.3 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.06-.4.1-.8.1-1.2z"/></svg></span>
+        <span class="icon-btn" title="网页全屏"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h6v2H6v4H4V4zm10 0h6v6h-2V6h-4V4zM4 14h2v4h4v2H4v-6zm14 0h2v6h-6v-2h4v-4z"/></svg></span>
+        <span class="icon-btn" title="全屏"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 9V4h5v2H6v3H4zm11-5h5v5h-2V6h-3V4zM4 15h2v3h3v2H4v-5zm14 0h2v5h-5v-2h3v-3z"/></svg></span>
+      </div>
+    </div>
+
+    <!-- 左下角轻提示：结构与 toast.ts 生成的 DOM 一致，两条从下往上叠 -->
+    <div class="k-bili-dm-toast" style="position: absolute; left: 16px; bottom: 62px;">
+      <div class="k-bili-dm-toast__item is-visible">
+        <span class="k-bili-dm-toast__icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-7l-4.6 3.5A1 1 0 0 1 7 19.6V17H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/></svg>
+        </span>
+        <span class="k-bili-dm-toast__text">世界最强的魔女，就此开始动 · 第3话 揭示板を見てみた！</span>
+      </div>
+      <div class="k-bili-dm-toast__item is-visible">
+        <span class="k-bili-dm-toast__icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-7l-4.6 3.5A1 1 0 0 1 7 19.6V17H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/></svg>
+        </span>
+        <span class="k-bili-dm-toast__text">匹配成功，已加载 640 条第三方弹幕</span>
+      </div>
+    </div>
+
+    <!-- 面板：结构与 panel.ts 生成的 DOM 一致 -->
+    <div class="k-bili-dm__panel" style="right: 22px; bottom: 84px; width: 300px;">
+      <div class="k-bili-dm__header">
+        <span class="k-bili-dm__title">第三方弹幕</span>
+        <span class="k-bili-dm__version">v2.0.14</span>
+        <button class="k-bili-dm__close">×</button>
+      </div>
+      <div class="k-bili-dm__body">
+        <label class="k-bili-dm__row">
+          <span class="k-bili-dm__label">启用注入</span>
+          <span class="k-bili-dm__switch">
+            <input type="checkbox" checked />
+            <span class="k-bili-dm__slider"></span>
+          </span>
+        </label>
+        <label class="k-bili-dm__row">
+          <span class="k-bili-dm__label">与原生去重</span>
+          <span class="k-bili-dm__switch">
+            <input type="checkbox" checked />
+            <span class="k-bili-dm__slider"></span>
+          </span>
+        </label>
+
+        <div class="k-bili-dm__status">
+          <div class="k-bili-dm__status-main">世界最强的魔女，就此开始动 · 第3话 揭示板を見てみた！</div>
+          <div class="k-bili-dm__status-sub">本次共 812 条，已注入 640 条（过滤 172）</div>
+          <div class="k-bili-dm__status-actions">
+            <button class="k-bili-dm__debug-toggle">详情</button>
+          </div>
+        </div>
+
+        <div class="k-bili-dm__section k-bili-dm__section--row">
+          <span>强制匹配</span>
+          <span class="k-bili-dm__fold-badge">1</span>
+        </div>
+        <div class="k-bili-dm__row k-bili-dm__row--input">
+          <input class="k-bili-dm__input" placeholder="UP 主 UID 或主页链接" />
+          <button class="k-bili-dm__mini">添加</button>
+        </div>
+        <button class="k-bili-dm__minor">把当前视频的 UP 主加进来</button>
+        <div class="k-bili-dm__list">
+          <div class="k-bili-dm__url">
+            <div class="k-bili-dm__url-head">
+              <span class="k-bili-dm__url-name">泛式</span>
+              <button class="k-bili-dm__icon">×</button>
+            </div>
+          </div>
+        </div>
+        <div class="k-bili-dm__tip">当前视频的 UP 主在白名单里：匹配出结果前先按住播放</div>
+
+        <div class="k-bili-dm__section">弹弹play匹配</div>
+        <div class="k-bili-dm__row k-bili-dm__row--input">
+          <input class="k-bili-dm__input" value="世界最强的魔女，就此开始动" />
+          <button class="k-bili-dm__mini">搜索</button>
+        </div>
+        <select class="k-bili-dm__select">
+          <option>第3话 揭示板を見てみた！</option>
+        </select>
+
+        <div class="k-bili-dm__section">URL 弹幕源</div>
+        <div class="k-bili-dm__row k-bili-dm__row--input">
+          <input class="k-bili-dm__input" placeholder="粘贴 B站 / 巴哈姆特 视频链接" />
+          <button class="k-bili-dm__mini">添加</button>
+        </div>
+        <div class="k-bili-dm__list">
+          <div class="k-bili-dm__url">
+            <div class="k-bili-dm__url-head">
+              <span class="k-bili-dm__url-name">哔哩哔哩 · 世界最强的魔女</span>
+              <button class="k-bili-dm__icon">×</button>
+            </div>
+            <div class="k-bili-dm__url-ep">第3话 · 428 条</div>
+            <div class="k-bili-dm__url-offset">
+              <span>偏移</span>
+              <input class="k-bili-dm__offset" value="0" />
+              <span>秒</span>
+            </div>
+          </div>
+        </div>
+        <div class="k-bili-dm__tip">URL来源和弹弹play可同时生效；支持时间轴偏移</div>
+
+        <div class="k-bili-dm__section k-bili-dm__section--row">
+          <span>过滤器</span>
+          <button class="k-bili-dm__icon-text">已启用</button>
+          <button class="k-bili-dm__icon-text">刷新生效</button>
+          <button class="k-bili-dm__fold-btn">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m6 9 6 6 6-6"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="margin-top: 14px; font-size: 13px; color: #6b7280;">
+    面板只在你点开时出现，点画面任何地方自动收起；控制条右侧那个图标就是入口。
+  </div>
+</div>
+</body>
+</html>
