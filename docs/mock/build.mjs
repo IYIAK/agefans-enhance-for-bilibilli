@@ -1,4 +1,8 @@
-// 生成 README 里的界面示意图。
+// 生成面板样式示意图（**不是** README 里的主图）。
+//
+// README 和官网主图已经换成真实运行截图（docs/screenshot-player.png），
+// 这里是「只跑样式、不开 B 站」时的回归图，产物叫 screenshot-mock.png，
+// 免得被误当成真实效果。
 //
 // 做法：把 src/adapter/bilibili/index.scss 编译出的**真实面板样式**注入
 // panel-mock.html（模拟的播放器画面 + 与 panel.ts 生成结构一致的面板 DOM），
@@ -50,7 +54,7 @@ if (!existsSync(edge)) {
   console.warn('没找到 Edge，跳过截图（HTML 已经生成，可以自己打开看）')
   process.exit(0)
 }
-const shot = join(repo, 'docs', 'screenshot.png')
+const shot = join(repo, 'docs', 'screenshot-mock.png')
 const res = spawnSync(
   edge,
   [

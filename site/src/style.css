@@ -306,6 +306,33 @@ code {
   color: var(--muted);
 }
 
+/* ── 截图 ──────────────────────────────────────────────── */
+
+.shot {
+  margin: 0;
+}
+
+.shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 12px;
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 24px 60px -30px rgba(0, 0, 0, 0.9);
+}
+
+.shot figcaption {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* 首屏那张要往上提一点，和按钮拉开层次 */
+.shot--wide {
+  margin-top: 48px;
+}
+
 /* ── 痛点 ──────────────────────────────────────────────── */
 
 .punch {

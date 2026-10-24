@@ -210,6 +210,12 @@ function homePage() {
         <a class="btn btn--ghost" href="./changelog.html">查看更新日志</a>
       </div>
     </div>
+    <div class="wrap">
+      <figure class="shot shot--wide">
+        <img src="./img/player.jpg" alt="全屏播放哔哩哔哩视频时，第三方弹幕面板展开在播放器右侧，画面里同时跑着原生弹幕和注入弹幕" decoding="async">
+        <figcaption>真实运行截图：B 站原生播放器、原生控制条、原生弹幕设置全都没动，只是右侧多了一块面板，左下角多了两条注入结果提示</figcaption>
+      </figure>
+    </div>
   </section>
 
   <section class="section">
@@ -465,6 +471,17 @@ async function main() {
     if (!home.includes(must)) problems.push(`index.html: 缺少「${must}」`)
   }
 
+  // 首页截图：HTML 引了就得真有这个文件，否则线上是破图
+  const IMG_FILES = ['player.jpg']
+  for (const name of IMG_FILES) {
+    if (!home.includes(`./img/${name}`)) {
+      problems.push(`index.html: 缺少截图引用 img/${name}`)
+    }
+    if (!existsSync(join(SRC, 'img', name))) {
+      problems.push(`缺少截图源文件 src/img/${name}`)
+    }
+  }
+
   // 更新日志特有断言
   const log = pages['changelog.html']
   if (!log.includes(SITE.version)) problems.push('changelog.html: 缺少最新版本号')
@@ -497,11 +514,38 @@ async function main() {
     console.warn('提示：没找到 ../dist/index.user.js，跳过脚本本体拷贝')
   }
 
-  const files = await readdir(DIST)
+  // 截图：首页首屏那张，从 src/img 原样拷进 dist/img。
+  // 首屏零外链的原则只约束「网络请求」，同域静态文件不影响。
+  const imgSrc = join(SRC, 'img')
+  const imgFiles = ['player.jpg']
+  if (existsSync(imgSrc)) {
+    await mkdir(join(DIST, 'img'), { recursive: true })
+    for (const name of imgFiles) {
+      const from = join(imgSrc, name)
+      if (!existsSync(from)) {
+        problems.push(`缺少截图 ${name}`)
+        continue
+      }
+      await writeFile(join(DIST, 'img', name), await readFile(from))
+    }
+  } else {
+    problems.push('缺少 src/img 目录（首页截图）')
+  }
+
+  // dist 里现在有 img/ 子目录：自己走一遍，只统计文件
+  const walk = async (dir, prefix = '') => {
+    const out = []
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name
+      if (entry.isDirectory()) out.push(...(await walk(join(dir, entry.name), rel)))
+      else out.push(rel)
+    }
+    return out
+  }
   console.log(`构建完成 → ${DIST}`)
-  for (const file of files) {
-    const size = (await readFile(join(DIST, file))).length
-    console.log(`  ${file.padEnd(18)} ${size.toLocaleString()} bytes`)
+  for (const rel of await walk(DIST)) {
+    const size = (await readFile(join(DIST, rel))).length
+    console.log(`  ${rel.padEnd(18)} ${size.toLocaleString()} bytes`)
   }
 }
 
