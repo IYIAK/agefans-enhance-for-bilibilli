@@ -22,7 +22,7 @@ const SRC = join(here, 'src')
 const SITE = {
   name: 'Danmaku Enhance',
   tagline: '把弹弹play的弹幕送进哔哩哔哩原生播放器',
-  repo: 'https://github.com/IYIAK/agefans-enhance-for-bilibilli',
+  repo: 'https://github.com/IYIAK/danmaku-enhance',
   upstream: 'https://github.com/IronKinoko/agefans-enhance',
   script: './index.user.js',
   version: RELEASES[0].version,
@@ -71,6 +71,7 @@ function layout({ title, description, page, body }) {
 <title>${esc(title)}</title>
 <meta name="description" content="${esc(description)}">
 <meta name="theme-color" content="#0b0c0f">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23fb7299' d='M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-7l-4.6 3.5A1 1 0 0 1 7 19.6V17H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm2 4v2h2V8H6Zm4 0v2h8V8h-8Zm-4 4v2h8v-2H6Zm10 0v2h2v-2h-2Z'/%3E%3C/svg%3E">
 <style>__STYLE__</style>
 </head>
 <body>

@@ -151,21 +151,17 @@ function dropTechTags(title: string): string {
 }
 
 /**
- * 删掉落单的括号。
+ * 把所有成对括号字符替换成空格，但保留括号里的文字。
  *
- * 页面标题常写成 `『佐佐木与文鸟小哔 第二季』第3话`：集数标记「第3话」在
- * 末尾，先被删掉之后，`』` 就孤零零地留在字符串中间，只剥首尾是不管用的。
- * 于是清洗结果里带着一个 `』`，整串搜不到，只能靠后面的短候选兜底。
- * 这里把每种成对括号数量对不上的一方全部删掉。
+ * `【A】第8集『B』第7话` 这类复合标题里，配对括号必须整对消失：
+ * 之前 dropLoneBrackets 只删数量不配对的一侧，配对括号原样保留，
+ * 结果「文本中间的括号去不掉」（用户实测）。这里一口气全部换成空格，
+ * 番名文字不动；画质标签（【4K】之类）里的词随后由 dropTechTags 清掉。
  */
-function dropLoneBrackets(text: string): string {
+export function stripBracketChars(text: string): string {
   let out = text
   for (const [ open, close ] of BRACKET_PAIRS) {
-    const left = out.split(open).length - 1
-    const right = out.split(close).length - 1
-    if (left === right) continue
-    if (left > right) out = out.split(open).join(' ')
-    else out = out.split(close).join(' ')
+    out = out.split(open).join(' ').split(close).join(' ')
   }
   return out
 }
@@ -185,25 +181,72 @@ export function cleanTitle(raw: string): string {
   // 去掉常见的站点后缀
   title = title.replace(/\s*[-_|]\s*(在线观看|線上看|免费观看|高清).*$/g, ' ')
 
-  // 集数标记删掉之后括号常常只剩下一边，先清掉再剥首尾
-  title = dropLoneBrackets(title)
+  // 集数标记删掉之后括号常常只剩下一边。所有括号字符（成对与落单）
+  // 一口气换成空格、保留里面的文字——只删落单侧会让中间的配对括号
+  // 原样留下（用户实测「【向日葵马戏团】第8集」洗完还带「】」）。
+  title = stripBracketChars(title)
 
-  // 首尾标点与括号
-  title = title.replace(new RegExp(`^${EDGE_PUNCT.source}`), '')
-  title = title.replace(new RegExp(`${EDGE_PUNCT.source}$`), '')
-  // 剥一轮之后可能又露出新的，再来一次
-  title = dropLoneBrackets(title)
+  // 首尾标点（stripBracketChars 已把括号全换成空格，这里只兜剩余标点）
   title = title.replace(new RegExp(`^${EDGE_PUNCT.source}`), '')
   title = title.replace(new RegExp(`${EDGE_PUNCT.source}$`), '')
 
-  // `【4K】番名` 这种：画质标签被括号包着，第一次 dropTechTags 时整个片段
-  // 不是纯画质词所以留了下来；等 EDGE_PUNCT 把 `【】` 剥掉，`4K` 就单独成了
-  // 一个片段，这时候才认得出来。
+  // `【4K】番名` 这种：画质标签被括号包着，stripBracketChars 之后 `4K`
+  // 单独成了一个片段，这时候才认得出来。
   title = dropTechTags(title)
   title = title.replace(new RegExp(`^${EDGE_PUNCT.source}`), '')
   title = title.replace(new RegExp(`${EDGE_PUNCT.source}$`), '')
 
   return title.replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * 从「转发合集」式的复合标题里拆出当前在播的番名与集数。
+ *
+ * `【向日葵马戏团】第8集『花织同学就算是转生后还是想干架』第7话`
+ * —— 第一个集数「第8集」属于被转发的原作，真正在播的是『花织同学…』，
+ * 集数是**最后一个**标记对应的「第7话」。这类标题的规律是：
+ * 「番名段 + 它自己的集数标记」成对出现，最后那对才是当前视频。
+ *
+ * 返回 undefined 表示标题里没有集数标记，调用方走原有兜底。
+ */
+export function splitCompoundTitle(
+  raw: string
+): { seriesName: string; episode: string } | undefined {
+  const title = String(raw || '').trim()
+  if (!title) return undefined
+
+  // 「第N集/话/話/期/回」的定位正则（同 EPISODE_MARKERS 的单集写法，
+  // 但只匹配、不替换，且要拿到位置）。数字或中文数字都收。
+  const marker =
+    /第\s*([0-9]+(?:\.[0-9]+)?|[零一二两三四五六七八九十]+)\s*[集话話期回]/g
+  const marks: { index: number; end: number; episode: string }[] = []
+  for (let match = marker.exec(title); match; match = marker.exec(title)) {
+    const num = match[1]
+    marks.push({
+      index: match.index,
+      end: match.index + match[0].length,
+      episode: /^[0-9]/.test(num) ? String(parseFloat(num)) : num,
+    })
+  }
+  if (!marks.length) return undefined
+
+  // 当前视频 = 最后一个集数标记那一对。番名在标记之前、上一个标记
+  // 结束之后的那一段里（第一个标记时就是标题开头）。
+  const last = marks[marks.length - 1]
+  const prevEnd = marks.length > 1 ? marks[marks.length - 2].end : 0
+  let series = title.slice(prevEnd, last.index)
+
+  // 括号里的才是番名本体（『花织同学…』），括号外的修饰（字幕组、画质）
+  // 通常在括号外。先把括号字符换空格再挑最长的一段当番名。
+  series = stripBracketChars(series)
+  const parts = segments(series)
+  if (parts.length) {
+    series = parts.reduce((a, b) => (b.length > a.length ? b : a))
+  }
+
+  series = series.trim()
+  if (!series) return undefined
+  return { seriesName: series, episode: last.episode }
 }
 
 /** 去掉所有分隔符与空格，处理全角半角差异 */

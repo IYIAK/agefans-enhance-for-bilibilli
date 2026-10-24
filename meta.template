@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Danmaku Enhance
-// @namespace    https://github.com/IYIAK/agefans-enhance-for-bilibilli
-// @icon         https://www.bilibili.com/favicon.ico
+// @namespace    https://github.com/IYIAK/danmaku-enhance
+// @icon         data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDI0IDI0Ij48cGF0aCBmaWxsPSIjZmI3Mjk5IiBkPSJNNCA0aDE2YTIgMiAwIDAgMSAyIDJ2OWEyIDIgMCAwIDEtMiAyaC03bC00LjYgMy41QTEgMSAwIDAgMSA3IDE5LjZWMTdINGEyIDIgMCAwIDEtMi0yVjZhMiAyIDAgMCAxIDItMlptMiA0djJoMlY4SDZabTQgMHYyaDhWOGgtOFptLTQgNHYyaDh2LTJINlptMTAgMHYyaDJ2LTJoLTJaIi8+PC9zdmc+
 // @version      #version#
 // @description  #description#
 // @author       IronKinoko
@@ -44,8 +44,8 @@
 // @connect      api.bilibili.com
 // @connect      ani.gamer.com.tw
 // @license      MIT
-// @downloadURL  https://github.com/IYIAK/agefans-enhance-for-bilibilli/raw/gh-pages/index.user.js
-// @updateURL    https://github.com/IYIAK/agefans-enhance-for-bilibilli/raw/gh-pages/index.user.js
+// @downloadURL  https://github.com/IYIAK/danmaku-enhance/raw/gh-pages/index.user.js
+// @updateURL    https://github.com/IYIAK/danmaku-enhance/raw/gh-pages/index.user.js
 // ==/UserScript==
 
 /**

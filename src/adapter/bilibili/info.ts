@@ -5,6 +5,8 @@
  * 番剧页：window.__playinfo__（result.arc / result.supplement）
  * 兜底：document.title + 页面 DOM
  */
+import { cleanTitle, splitCompoundTitle } from './match'
+
 export interface BiliPageInfo {
   live: boolean
   /** 番剧/系列名 */
@@ -287,10 +289,12 @@ export async function readVideoInfoByCidAsync(cid: number): Promise<BiliPageInfo
     : (await fetchVideoTitle(bvid)) || readDomInfo().seriesName
   if (!title) return undefined
 
+  // 同 buildVideoInfo：复合标题的番名/集数拆分，单分P 的集数补回标题标记。
+  const compound = splitCompoundTitle(title)
   return {
     live: false,
-    seriesName: title,
-    episode: episodeOf(pages, index),
+    seriesName: compound?.seriesName || title,
+    episode: episodeOf(pages, index) || compound?.episode || '',
     cid,
     aid: toNumber(videoData?.aid),
     source: 'video',
@@ -331,10 +335,12 @@ export async function readVideoInfoByBvidAsync(bvid: string): Promise<BiliPageIn
     }
   }
 
+  // 同 buildVideoInfo：复合标题拆分 + 单分P 集数兜底。
+  const compound = splitCompoundTitle(title)
   return {
     live: false,
-    seriesName: title,
-    episode: pages ? episodeOf(pages, page - 1) : '',
+    seriesName: compound?.seriesName || title,
+    episode: (pages ? episodeOf(pages, page - 1) : '') || compound?.episode || '',
     cid: toNumber(pages?.[page - 1]?.cid),
     source: 'video',
   }
@@ -351,10 +357,15 @@ function buildVideoInfo(
 
   if (!cid && !title) return undefined
 
+  // 复合标题（「转发合集」式）：番名取最后一个标记内侧那部；集数优先分P 名
+  // （多分P/合集的 part 就是集名），单分P 没有集名时退到标题里最后一个标记。
+  // 之前只在 readDomInfo 的兜底里拆复合标题，而视频页走的是这条路——
+  // 「【向日葵马戏团】第8集『花织同学…』第7话」这类单P 投稿就永远拿不到集数。
+  const compound = splitCompoundTitle(title)
   return {
     live: false,
-    seriesName: title,
-    episode: episodeOf(pages, page - 1),
+    seriesName: compound?.seriesName || title,
+    episode: episodeOf(pages, page - 1) || compound?.episode || '',
     cid,
     aid: toNumber(videoData.aid),
     source: 'video',
@@ -394,6 +405,11 @@ function readBangumiInfo(): BiliPageInfo | undefined {
 function readDomInfo(): BiliPageInfo {
   const title = document.title || ''
 
+  // 「转发合集」式复合标题优先：【A】第8集『B』第7话 —— 第一个集数属于
+  // 原作 A，真正在播的是『B』；取最后一个标记的番名与集数。DOM 里的
+  // 系列名常是合集标题（「向日葵马戏团」），用它会把集数对到错误的番上。
+  const compound = splitCompoundTitle(title)
+
   // 番剧/影视页左侧的系列名
   const $mediaTitle = $('a[class*="mediainfo_mediaTitle"]').first()
   let seriesName = String($mediaTitle.attr('title') || '').trim()
@@ -410,7 +426,17 @@ function readDomInfo(): BiliPageInfo {
   // 集数单位要跟 match.ts 的 EPISODE_MARKERS 对齐，繁体「話」和「回」也算：
   // 港台番剧页标题常写「第3話」，只认简体就会漏。
   const episodeMatch = title.match(/第\s*([0-9]+(?:\.[0-9]+)?)\s*[集话話期回]/)
-  const episode = episodeMatch ? episodeMatch[1] : ''
+  let episode = episodeMatch ? episodeMatch[1] : ''
+
+  if (compound) {
+    // 复合标题：番名与集数都以最后一个标记为准（在播的那部）。
+    seriesName = compound.seriesName
+    episode = compound.episode
+  } else if (seriesName && episode) {
+    // 普通标题：把「第N集」这类尾巴从系列名里剥掉，
+    // 留给弹弹play 的是纯番名。
+    seriesName = cleanTitle(seriesName) || seriesName
+  }
 
   return {
     live: false,

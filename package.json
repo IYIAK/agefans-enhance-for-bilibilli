@@ -6,7 +6,7 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/IYIAK/agefans-enhance-for-bilibilli.git"
+    "url": "git+https://github.com/IYIAK/danmaku-enhance.git"
   },
   "keywords": [
     "agefans",
@@ -17,9 +17,9 @@
   "author": "IronKinoko <kinoko.main@gmail.com>",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/IYIAK/agefans-enhance-for-bilibilli/issues"
+    "url": "https://github.com/IYIAK/danmaku-enhance/issues"
   },
-  "homepage": "https://github.com/IYIAK/agefans-enhance-for-bilibilli#readme",
+  "homepage": "https://github.com/IYIAK/danmaku-enhance#readme",
   "scripts": {
     "dev": "bocchi dev",
     "build": "bocchi build",

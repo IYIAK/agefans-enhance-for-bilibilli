@@ -79,7 +79,7 @@ GET api.bilibili.com/x/v2/dm/web/seg.so?type=1&oid=<cid>&segment_index=<n>
 ## 安装
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/)（Violentmonkey 亦可）
-2. 安装脚本：[index.user.js](https://github.com/IYIAK/agefans-enhance-for-bilibilli/raw/gh-pages/index.user.js)
+2. 安装脚本：[index.user.js](https://github.com/IYIAK/danmaku-enhance/raw/gh-pages/index.user.js)
 
 推送 `master` 后由 GitHub Actions 自动构建并发布至 `gh-pages` 分支，上述地址始终为最新构建。
 
