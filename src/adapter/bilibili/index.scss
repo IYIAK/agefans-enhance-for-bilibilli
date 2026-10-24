@@ -1,37 +1,124 @@
 .k-bili-dm {
+  // 控制条按钮。
+  //
+  // 这个节点同时挂着 B 站原生的 `bpx-player-ctrl-btn`（见 panel.ts），
+  // 尺寸/行高/全屏放大全部交给播放器样式表，这里只做「把图标摆正」这件事：
+  //
+  // 播放器内联样式是 .bpx-player-ctrl-btn{height:22px;line-height:22px;
+  // width:36px;font-size:0;text-align:center}，全屏/宽屏下媒体查询把它变成
+  // height:43px;line-height:32px;width:54px，图标 28px。
+  // 之前自己写死 26×26 + translateY(-1px)，常规窗口凑合，一进全屏就偏高。
   &__btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    // 不要写 align-self：B 站控制条自己用一套对齐把按钮排在一条线上，
-    // 我们单独指定 center 反而会被顶得比邻居高一截/低一截，看着就是没对齐。
-    width: 26px;
-    height: 26px;
-    margin-right: 10px;
-    // inline-flex 默认按基线排，把行高归零才不会跟着文字基线往下沉
-    line-height: 0;
-    // 控制条是按基线对齐的，图标没有文字，光靠 line-height 还差一点，
-    // 往上抬 1px 才能和左右邻居的视觉中线对上。
-    transform: translateY(-1px);
-    border-radius: 4px;
-    color: #fff;
+    // 原生按钮是 line-height 撑行盒、图标靠 vertical-align:middle 对齐，
+    // 所以这里也照原样来：不写 display:flex，盒子高度/行高全交给
+    // .bpx-player-ctrl-btn（22px/行高 22，全屏 43px/行高 32）。
+    // flex 居中和原生的基线对齐差半个 x-height，实测全屏会偏 5.5px。
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
     cursor: pointer;
     opacity: 0.9;
-    transition: background-color 0.15s;
+    transition: opacity 0.15s;
+
+    // 尺寸和原生同名类给的值完全一致，但**必须自己写一份**：
+    // 页面刚加载、播放器样式表还没插进来时，`.bpx-player-ctrl-btn` 是没有
+    // 任何规则的，下面 svg 的 width/height:100% 就失去尺寸来源，会被撑成
+    // 整个容器那么大——就是「页面加载时一个超级大的图标」。
+    // 全屏/宽屏的放大同样照抄播放器那条媒体查询（54×43、图标 28px）。
+    width: 36px;
+    height: 22px;
+    line-height: 22px;
+    font-size: 0;
+    text-align: center;
+
+    // 用户实测：图标比原生邻居略靠右上一点。原生相邻按钮之间本来就有
+    // 容器间距撑着，我们插在中间没有那段余量，所以自己补右外边距；
+    // 纵向差不到 1px，用 transform 微调比改行高安全（改 height 会被
+    // 控制条 flex 的 align-items:stretch 拉满整行）。
+    margin-right: 8px;
+    transform: translateY(1px);
+
+    // 还没被放进控制条之前不画出来。上面那份兜底尺寸已经能挡住「巨大图标」，
+    // 这一层是双保险：播放器重建控制条时中间会有一小段时间我们的按钮
+    // 悬在页面流里，露出来就是一块空空的白。
+    visibility: hidden;
+
+    // 挂进控制条（含右下角兜底圆按钮）之后才显示
+    &.is-placed,
+    &.is-floating {
+      visibility: visible;
+    }
+
+    // 图标容器和 svg 的尺寸：外层跟原生一致（100% 宽、22px 高，全屏 28px），
+    // svg 撑满整格、图形靠 viewBox 的 preserveAspectRatio 自己居中。
+    //   .bpx-player-ctrl-btn-icon{width:100%}
+    //   .bpx-common-svg-icon{display:inline-flex;width:100%;height:22px}
+    //   .bpx-common-svg-icon svg{width:100%;height:100%}
+    // 之前这里写死 `svg{width:22px;height:22px}`（全屏 28px），两个后果：
+    //  1. 外层 span 是全屏的 53px 宽、svg 只有 28px，而 inline-flex 默认靠左
+    //     ——图标贴到盒子左边，右边空一大截；
+    //  2. svg 是替换元素，22px 塞进 28px 的 flex 行里会按基线落位，比撑满时
+    //     略高——就是「还有点高」。
+    .bpx-player-ctrl-btn-icon {
+      width: 100%;
+    }
+
+    .bpx-common-svg-icon {
+      display: inline-flex;
+      width: 100%;
+      height: 22px;
+      // 原生就是 inline-flex + 100% 宽；这里显式写居中，避免哪天我们
+      // 自己加了 display:flex 之类把它压成靠左。
+      justify-content: center;
+      align-items: center;
+      // 原生那条 `vertical-align:middle` 是对齐的最后一环，别漏
+      vertical-align: middle;
+    }
 
     svg {
-      width: 20px;
-      height: 20px;
       display: block;
+      width: 100%;
+      height: 100%;
     }
 
     &:hover,
     &.is-active {
       opacity: 1;
       color: #fb7299;
-      background: rgba(255, 255, 255, 0.12);
     }
 
+    // 全屏 / 宽屏下原生按钮和图标都变大（54×43、图标 28px）。
+    // 注意**不要**写 height:auto —— 控制条容器是 `display:flex`，
+    // 子项一旦高度自适应就会被 align-items:stretch 拉到整行 56px，
+    // 而原生按钮靠显式的 43px 挡住拉伸。
+    @media screen and (min-width: 750px) {
+      .bpx-player-container[data-screen='full'] &,
+      .bpx-player-container[data-screen='web'] & {
+        width: 54px;
+        height: 43px;
+        line-height: 32px;
+
+        .bpx-common-svg-icon {
+          height: 28px;
+        }
+      }
+
+      // 右下角兜底圆按钮不受全屏放大影响（它不在控制条里，
+      // 但仍可能挂着播放器容器上的 data-screen）
+      .bpx-player-container[data-screen='full'] &.is-floating,
+      .bpx-player-container[data-screen='web'] &.is-floating {
+        width: 32px;
+        height: 32px;
+        line-height: 32px;
+
+        .bpx-common-svg-icon {
+          height: 20px;
+        }
+      }
+    }
+
+    // 找不到控制条时的兜底：贴右下角自己造一个圆按钮
     &.is-floating {
       position: fixed;
       right: 16px;
@@ -39,9 +126,14 @@
       z-index: 100001;
       width: 32px;
       height: 32px;
+      line-height: 32px;
       border-radius: 50%;
       background: rgba(24, 25, 28, 0.9);
-      transform: none;
+      color: #fff;
+
+      .bpx-common-svg-icon {
+        height: 20px;
+      }
     }
   }
 

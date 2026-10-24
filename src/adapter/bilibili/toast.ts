@@ -10,6 +10,8 @@
  * 原来那条并重新计时，不会越堆越多。
  */
 
+import { mountOverlay, onFullscreenChange, overlayHost } from './overlay'
+
 const ROOT_CLASS = 'k-bili-dm-toast'
 const ITEM_CLASS = `${ROOT_CLASS}__item`
 
@@ -28,6 +30,9 @@ const CONTROL_BAR_SELECTORS = [
   '.bpx-player-control',
   '.bilibili-player-video-control',
 ]
+
+/** 视频画面，提示贴它的左沿（比播放器容器更准：容器含控制条和黑边） */
+const VIDEO_SELECTORS = ['video.bpx-player-video', '.bpx-player-video-wrap video', 'video']
 
 const DEFAULT_DURATION = 3000
 
@@ -59,6 +64,8 @@ let host: HTMLDivElement | null = null
 let items: ToastItem[] = []
 let placeRaf = 0
 let onScrollBound = false
+/** 全屏监听的注销函数，宿主存在期间保持一份 */
+let unbindFullscreen: (() => void) | null = null
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -77,23 +84,38 @@ function findOne(selectors: string[]) {
   return null
 }
 
-/** 播放器左下角、控制条上方一点 */
+/**
+ * 播放器左下角、控制条上方一点。
+ *
+ * 边距是照着用户反馈调的：左右各留 16px 时看起来像「浮在画面中间」，
+ * 收到 4px 又贴得太死、像是被画面边框切了一半，现在取 12px；
+ * 纵向离控制条 26px，免得跟那排按钮挤在一起、也躲开弹幕最密的那一横条。
+ *
+ * 横向锚的是 <video> 而不是播放器容器：容器在网页全屏/剧场模式下会带黑边，
+ * 按容器算出来的位置会明显偏里。
+ */
+const TOAST_INSET_X = 12
+const TOAST_GAP_BAR = 26
+
 function place(node: HTMLDivElement) {
   const player = findOne(PLAYER_SELECTORS)
   const playerRect = player ? player.getBoundingClientRect() : null
+  const video = findOne(VIDEO_SELECTORS)
+  const videoRect = video ? video.getBoundingClientRect() : null
   const bar = findOne(CONTROL_BAR_SELECTORS)
   const barRect = bar ? bar.getBoundingClientRect() : null
 
   // 提示是往上叠的，锚点给最下面那一条用底部对齐
-  if (playerRect && playerRect.width > 0) {
-    node.style.left = `${Math.max(8, playerRect.left + 16)}px`
+  const leftEdge = videoRect && videoRect.width > 0 ? videoRect.left : playerRect?.left
+  if (leftEdge !== undefined) {
+    node.style.left = `${Math.max(TOAST_INSET_X, leftEdge + TOAST_INSET_X)}px`
     node.style.bottom = barRect
-      ? `${Math.max(8, window.innerHeight - barRect.top + 10)}px`
-      : `${Math.max(8, window.innerHeight - playerRect.bottom + 52)}px`
+      ? `${Math.max(8, window.innerHeight - barRect.top + TOAST_GAP_BAR)}px`
+      : `${Math.max(8, window.innerHeight - (playerRect?.bottom ?? window.innerHeight) + 68)}px`
     return
   }
-  node.style.left = '16px'
-  node.style.bottom = '120px'
+  node.style.left = `${TOAST_INSET_X}px`
+  node.style.bottom = '136px'
 }
 
 function reposition() {
@@ -128,12 +150,23 @@ function unbindFollow() {
 }
 
 function ensureHost() {
-  if (host && host.isConnected) return host
+  if (host && host.isConnected) {
+    // 进出全屏后宿主换了地方（body ↔ 全屏元素），提示要跟过去，
+    // 否则全屏下整片提示都看不见
+    mountOverlay(host)
+    return host
+  }
   host = el('div', ROOT_CLASS)
   host.hidden = true
-  document.body.append(host)
+  mountOverlay(host)
   // 宿主重建后旧节点已经不在文档里，清掉免得留着悬空引用
   items = []
+  // 全屏切换时浮动元素的定位基准变了，重新算一次
+  if (!unbindFullscreen) unbindFullscreen = onFullscreenChange(() => {
+    if (!host || host.hidden) return
+    mountOverlay(host)
+    place(host)
+  })
   return host
 }
 
@@ -263,4 +296,6 @@ export function disposeToast() {
   items = []
   host?.remove()
   host = null
+  unbindFullscreen?.()
+  unbindFullscreen = null
 }

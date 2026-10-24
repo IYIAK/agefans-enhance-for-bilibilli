@@ -61,6 +61,7 @@ import {
 } from './sources/state'
 import type { UrlSourceEntry } from './sources/state'
 import { clearToast, disposeToast, showToast } from './toast'
+import { mountOverlay, onFullscreenChange } from './overlay'
 
 const ROOT_CLASS = 'k-bili-dm'
 
@@ -199,10 +200,32 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   let currentEp = readEpisodeId()
 
   // ── 控制条按钮 ───────────────────────────────────────────
-  const button = el('div', `${ROOT_CLASS}__btn`)
+  //
+  // 结构照 BilibiliSponsorBlock（hanydd）的做法：按钮自己带上原生类名
+  // `bpx-player-ctrl-btn`，让播放器的内联样式决定盒模型，我们只往里塞图标。
+  //
+  // 之前是自己造一个 26×26 的 div，靠 `transform: translateY(-1px)` 手动微调，
+  // 常规窗口看着还行，一进全屏就偏高——因为原生按钮在全屏/宽屏下有
+  // media query 长到 54×43、图标 28px（见播放器内联样式），我们的尺寸写死了，
+  // 高度跟不上邻居，视觉中线就错位。复用原生类名后这些尺寸自动跟随。
+  // 用 div 而不是 button：Chrome 会给 <button> 套一层「内容垂直居中」的匿名盒，
+  // 原生那套 line-height + vertical-align:middle 的对齐就失效了，全屏下实测
+  // 图标比邻居低 5.5px。BilibiliSponsorBlock 用的也是 div。
+  // 可访问性用 role/tabindex 补回来（键盘 Enter/Space 在下面绑定）。
+  const button = el('div', `${ROOT_CLASS}__btn bpx-player-ctrl-btn`)
+  button.setAttribute('role', 'button')
+  button.tabIndex = 0
   button.title = '第三方弹幕'
+  // 结构照抄原生按钮：.bpx-player-ctrl-btn > .bpx-player-ctrl-btn-icon >
+  // .bpx-common-svg-icon > svg。播放器那套 line-height + vertical-align:middle
+  // 的对齐只在这个结构下才对得上，自己省掉任何一层都会差半行
+  // （实测全屏图标偏低 5.5px）。BilibiliSponsorBlock 也是这么复用的。
   button.innerHTML =
-    '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-7l-4.6 3.5A1 1 0 0 1 7 19.6V17H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm2 4v2h2V8H6Zm4 0v2h8V8h-8Zm-4 4v2h8v-2H6Zm10 0v2h2v-2h-2Z"/></svg>'
+    '<div class="bpx-player-ctrl-btn-icon">' +
+    '<span class="bpx-common-svg-icon">' +
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-7l-4.6 3.5A1 1 0 0 1 7 19.6V17H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm2 4v2h2V8H6Zm4 0v2h8V8h-8Zm-4 4v2h8v-2H6Zm10 0v2h2v-2h-2Z"/></svg>' +
+    '</span>' +
+    '</div>'
 
   // ── 面板骨架 ────────────────────────────────────────────
   const panel = el('div', `${ROOT_CLASS}__panel`)
@@ -555,7 +578,9 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   panel.append(header, body)
 
   // ── 挂载 ────────────────────────────────────────────────
-  document.body.append(panel)
+  // 不能固定挂 body：B 站进全屏用的是元素全屏，全屏元素成为顶层后
+  // 只有它的后代才被绘制，挂 body 的面板在全屏下会整个消失。
+  mountOverlay(panel)
   panel.classList.add('is-floating')
 
   let anchorRetry = 0
@@ -579,6 +604,9 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
         target.insertBefore(button, before)
         button.classList.remove('is-floating')
       }
+      // is-placed 控制 visibility：没进控制条之前按钮是隐藏的，
+      // 免得播放器还没渲染完时那个脱离上下文的图标在页面里闪一下。
+      button.classList.add('is-placed')
       return
     }
 
@@ -589,12 +617,13 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
         anchorEl.append(button)
         button.classList.remove('is-floating')
       }
+      button.classList.add('is-placed')
       return
     }
     if (button.parentElement) return
     if (anchorRetry++ >= ANCHOR_RETRY) {
       button.classList.add('is-floating')
-      document.body.append(button)
+      mountOverlay(button)
       return
     }
     anchorTimer = window.setTimeout(placeButton, ANCHOR_RETRY_MS)
@@ -744,6 +773,13 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
     e.stopPropagation()
     open(!opened)
   })
+  // div 不会像 button 那样把 Enter/Space 当点击，补回来
+  button.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return
+    e.preventDefault()
+    e.stopPropagation()
+    open(!opened)
+  })
   closeBtn.addEventListener('click', () => open(false))
   panel.addEventListener('click', (e) => e.stopPropagation())
   // 用捕获阶段：B 站播放器在 click 上 stopPropagation（点画面=播放/暂停），
@@ -754,6 +790,23 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
   // scroll 不冒泡，只能在捕获阶段拿到；这样播放器内部那几个滚动容器
   // （宽屏模式的推荐列表、番剧选集区）滚动时也能跟着重算
   window.addEventListener('scroll', onScroll, true)
+
+  /**
+   * 进出全屏时搬家。
+   *
+   * 全屏元素只绘制自己的后代，浮层必须跟着进/出全屏元素，否则全屏下面板
+   * 和提示都看不见。搬完还要重新定位：fixed 的参照系从视口变成了全屏元素，
+   * 高度也该按新的可用空间重算。
+   */
+  function onFullscreen() {
+    if (detached) return
+    mountOverlay(panel)
+    if (!button.parentElement) mountOverlay(button)
+    pinnedMaxHeight = 0
+    placeButton()
+    if (opened) placePanel(true)
+  }
+  const unbindFullscreen = onFullscreenChange(onFullscreen)
 
   // ── 开关 ────────────────────────────────────────────────
   switchInput.addEventListener('change', () => {
@@ -2095,6 +2148,7 @@ export function mountPanel(info: BiliPageInfo): PanelHandle {
       document.removeEventListener('play', onVideoPlay, true)
       window.removeEventListener('resize', onResize)
       window.removeEventListener('scroll', onScroll, true)
+      unbindFullscreen()
       if (scrollRaf) window.cancelAnimationFrame(scrollRaf)
       if (replaceRaf) window.cancelAnimationFrame(replaceRaf)
       onBodyMutation.disconnect()
