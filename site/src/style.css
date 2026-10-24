@@ -395,6 +395,29 @@ code {
   font-size: 13.5px;
 }
 
+/*
+ * 主要能力是 7 张卡片。1040px 宽下 minmax(280px,1fr) 只能排 3 列，
+ * 7 张会变成 3+3+1，最后一张孤零零挂在末尾很难看。
+ * 改成 4 列：第一张跨 2 列当主卡，正好铺满 4+3 两行。
+ */
+.grid--features {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.grid--features .card--lead {
+  grid-column: span 2;
+  background: linear-gradient(160deg, var(--surface-2), var(--surface));
+  border-color: var(--border-strong);
+}
+
+.grid--features .card--lead h3 {
+  font-size: 16px;
+}
+
+.grid--features .card--lead p {
+  max-width: 46ch;
+}
+
 /* ── 来源列表 ──────────────────────────────────────────── */
 
 .sources {
@@ -692,6 +715,13 @@ code {
 
 /* ── 窄屏 ──────────────────────────────────────────────── */
 
+/* 中等宽度：4 列变 2 列，主卡仍然跨满一行 */
+@media (max-width: 980px) {
+  .grid--features {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 640px) {
   .wrap {
     padding: 0 18px;
@@ -704,6 +734,15 @@ code {
   .metrics {
     gap: 20px 16px;
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  /* 手机上一列到底，主卡不再跨列 */
+  .grid--features {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .grid--features .card--lead {
+    grid-column: auto;
   }
 
   .site-header .wrap {
